@@ -131,10 +131,6 @@ pytest tests/ -v
 pytest tests/test_config_comparison.py -v
 ```
 
-## 📄 라이센스
-
-이 프로젝트는 MIT 라이센스 하에 배포됩니다. 자세한 내용은 `LICENSE` 파일을 참조하세요.
-
 ## 📚 참고 자료
 
 - [LangChain Documentation](https://python.langchain.com/)
