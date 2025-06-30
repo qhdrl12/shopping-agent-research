@@ -1,0 +1,23 @@
+[project]
+name = "scrap-agent"
+version = "0.1.0"
+description = "A web scraping and question-answering agent."
+dependencies = [
+    "langchain",
+    "langgraph",
+    "firecrawl-py",
+    "langchain_openai",
+    "faiss-cpu",
+    "python-dotenv",
+    "lancedb",
+    "langchain-community>=0.3.26",
+    "langchain-mcp-adapters>=0.1.7",
+    "streamlit>=1.46.1",
+    "openai>=1.92.2",
+    "fastmcp>=2.9.2",
+    "tavily-python>=0.7.8",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

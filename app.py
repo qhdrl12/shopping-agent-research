@@ -1,480 +1,997 @@
+# app.py
+"""
+AI 쇼핑 어시스턴트 웹 인터페이스
+
+이 모듈은 Streamlit을 사용하여 AI 쇼핑 어시스턴트의 웹 인터페이스를 구현합니다.
+LangChain/LangGraph 에이전트와 FireCrawl 도구를 활용하여 사용자 질의에 응답하며,
+LangGraph의 checkpoint_ns를 활용한 정확한 도구 추적 및 에러 처리 시스템을 제공합니다.
+
+주요 기능:
+- 실시간 스트리밍 채팅 인터페이스
+- 도구 실행 상태 추적 및 시각화
+- 그룹 단위 에러 처리 (checkpoint_ns 기반)
+- 도구 실행 시간 및 상세 정보 표시
+"""
 
 import streamlit as st
 import asyncio
 import json
-from firecrawl_agent import build_agent
+import traceback
 
-# 페이지 설정
-st.set_page_config(page_title="쇼핑 어시스턴트", page_icon="🛍️", layout="wide")
+from dotenv import load_dotenv
+from langchain_core.messages import ToolMessage
+from typing import Dict, Any, List, Optional, Set, Tuple
+from agent.enhanced_shopping_agent import build_enhanced_agent
 
-# 세션 상태 초기화
+load_dotenv()
+
+
+# =============================================================================
+# Streamlit 앱 설정 및 초기화
+# =============================================================================
+
+st.set_page_config(
+    page_title="쇼핑 어시스턴트", 
+    page_icon="🛍️", 
+    layout="wide"
+)
+
+# 세션 상태 초기화 - Streamlit의 상태 관리 시스템
 if 'agent' not in st.session_state:
-    st.session_state.agent = None
+    st.session_state.agent = None  # LangChain 에이전트 인스턴스
 if 'messages' not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = []  # 채팅 메시지 히스토리
 if 'history' not in st.session_state:
-    st.session_state.history = []
+    st.session_state.history = []  # LangChain 대화 히스토리
+
+
+# =============================================================================
+# 도구 실행 추적 클래스
+# =============================================================================
+
+class ToolExecutionTracker:
+    """
+    LangGraph 도구 실행을 추적하고 관리하는 클래스
+    
+    이 클래스는 LangGraph의 checkpoint_ns 시스템을 활용하여 도구 그룹을 정확히 추적하고,
+    도구 실행 실패 시 그룹 내 모든 도구에 일관된 에러 처리를 제공합니다.
+    
+    주요 구성 요소:
+    - tool_calls: 개별 도구 실행 정보 저장 (run_id 기반)
+    - tools_groups: 도구 그룹 추적 (checkpoint_ns 기반)
+    - completed_tools: 완료된 도구 추적
+    """
+    
+    def __init__(self):
+        """추적기 초기화"""
+        # 개별 도구 실행 정보를 run_id로 추적
+        # 각 도구의 시작시간, 종료시간, 입력, 출력, 에러 상태 등을 저장
+        self.tool_calls: Dict[str, Dict[str, Any]] = {}
+        
+        # LangGraph의 checkpoint_ns로 도구 그룹을 추적
+        # 형태: {"tools:uuid": {run_id1, run_id2, run_id3}}
+        # 같은 요청에서 실행되는 여러 도구들이 동일한 namespace를 공유
+        self.tools_groups: Dict[str, Set[str]] = {}
+        
+        # 완료된 도구들의 run_id 집합
+        # 중복 처리 방지 및 상태 추적용
+        self.completed_tools: Set[str] = set()
+    
+    def extract_tools_namespace(self, event: Dict[str, Any]) -> Optional[str]:
+        """
+        LangGraph 이벤트에서 tools namespace를 추출
+        
+        LangGraph는 관련된 도구들을 'tools:uuid' 형태의 namespace로 그룹화합니다.
+        이를 통해 동일한 요청에서 실행되는 여러 도구들을 하나의 그룹으로 관리할 수 있습니다.
+        
+        Args:
+            event: LangGraph 이벤트 객체
+            
+        Returns:
+            tools namespace 문자열 또는 None
+        """
+        metadata = event.get('metadata', {})
+        checkpoint_ns = metadata.get('langgraph_checkpoint_ns', '')
+        
+        # 'tools:'로 시작하는 namespace만 유효한 것으로 간주
+        if checkpoint_ns and checkpoint_ns.startswith('tools:'):
+            return checkpoint_ns
+        return None
+    
+    def start_tool_execution(
+        self, 
+        run_id: str, 
+        tool_name: str, 
+        input_data: Any, 
+        event: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        도구 실행 시작을 추적 및 등록
+        
+        새로운 도구 실행이 시작될 때 호출되며, 도구의 기본 정보를 설정하고
+        해당 도구를 적절한 그룹에 배정합니다.
+        
+        Args:
+            run_id: 도구 실행의 고유 식별자
+            tool_name: 실행되는 도구의 이름
+            input_data: 도구에 전달되는 입력 데이터
+            event: LangGraph 이벤트 객체
+            
+        Returns:
+            생성된 도구 호출 데이터 딕셔너리
+        """
+        tools_namespace = self.extract_tools_namespace(event)
+        
+        # 도구 실행 정보 구조체 생성
+        call_data = {
+            "run_id": run_id,
+            "name": tool_name,
+            "input": input_data,
+            "output": None,
+            "finished": False,
+            "error": None,
+            "start_time": asyncio.get_event_loop().time(),
+            "tools_namespace": tools_namespace,
+            "end_time": None
+        }
+        
+        # run_id로 도구 정보 저장
+        self.tool_calls[run_id] = call_data
+        
+        # tools 그룹에 도구 추가
+        # 같은 namespace의 도구들은 함께 관리됨
+        if tools_namespace:
+            if tools_namespace not in self.tools_groups:
+                self.tools_groups[tools_namespace] = set()
+            self.tools_groups[tools_namespace].add(run_id)
+        
+        return call_data
+    
+    def finish_tool_execution(
+        self, 
+        run_id: str, 
+        output: Any, 
+    ) -> Optional[Dict[str, Any]]:
+        """
+        도구 실행 완료 처리
+        
+        도구 실행이 완료되었을 때 호출되며, 결과를 저장하고 에러 상태를 판단합니다.
+        None이나 빈 결과의 경우 임시 에러 메시지를 생성하여 나중에 더 구체적인
+        에러로 업데이트될 수 있도록 합니다.
+        
+        Args:
+            run_id: 완료된 도구의 실행 ID
+            output: 도구의 실행 결과
+            event: LangGraph 이벤트 객체
+            
+        Returns:
+            업데이트된 도구 호출 데이터 또는 None
+        """
+        if run_id not in self.tool_calls:
+            return None
+            
+        call_data = self.tool_calls[run_id]
+        call_data["output"] = output
+        call_data["finished"] = True
+        call_data["end_time"] = asyncio.get_event_loop().time()
+        
+        # 완료된 도구로 마킹
+        self.completed_tools.add(run_id)
+        
+        # 결과 상태 분석 및 에러 처리
+        self._analyze_output_and_set_error(call_data, output)
+        
+        return call_data
+    
+    def _analyze_output_and_set_error(self, call_data: Dict[str, Any], output: Any) -> None:
+        """
+        도구 출력을 분석하여 에러 상태 설정
+        
+        도구의 출력 결과를 분석하여 성공/실패를 판단하고, 실패인 경우
+        적절한 에러 메시지를 설정합니다.
+        
+        Args:
+            call_data: 도구 호출 데이터
+            output: 도구 출력
+        """
+        if output is None:
+            # None 결과는 실행 실패로 간주
+            call_data["error"] = "도구가 결과를 반환하지 않았습니다."
+            call_data["output"] = f"ToolException: {call_data['error']}"
+            call_data["_is_placeholder_error"] = True
+            
+        elif isinstance(output, str):
+            if not output.strip():
+                # 빈 문자열도 실패로 간주
+                call_data["error"] = "도구가 빈 결과를 반환했습니다."
+                call_data["output"] = f"ToolException: {call_data['error']}"
+                call_data["_is_placeholder_error"] = True
+            elif self._is_error_string(output):
+                # 에러 키워드가 포함된 문자열
+                call_data["error"] = output
+                call_data["_is_placeholder_error"] = False
+                
+        elif isinstance(output, (dict, list)) and len(output) == 0:
+            # 빈 딕셔너리나 리스트도 실패로 간주
+            call_data["error"] = "도구가 빈 결과를 반환했습니다."
+            call_data["output"] = f"ToolException: {call_data['error']}"
+            call_data["_is_placeholder_error"] = True
+    
+    def _is_error_string(self, output: str) -> bool:
+        """문자열이 에러 메시지인지 판단"""
+        error_keywords = ['error', 'exception', 'failed', 'timeout', 'fail']
+        return any(keyword in output.lower() for keyword in error_keywords)
+    
+    def handle_group_error(self, error_event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        도구 그룹 전체에 대한 에러 처리
+        
+        LangGraph에서 on_chain_stream 이벤트를 통해 전달되는 그룹 레벨 에러를
+        처리합니다. checkpoint_ns를 사용하여 해당 그룹의 모든 도구에 동일한
+        에러 메시지를 적용합니다.
+        
+        Args:
+            error_event: 에러 이벤트 객체
+            
+        Returns:
+            업데이트된 도구 호출 데이터 리스트
+        """
+        tools_namespace = self.extract_tools_namespace(error_event)
+        updated_calls = []
+        
+        if not tools_namespace or tools_namespace not in self.tools_groups:
+            return updated_calls
+        
+        # 에러 메시지 추출
+        error_message = self._extract_error_message(error_event)
+        
+        # 해당 그룹의 모든 도구에 에러 적용
+        for run_id in self.tools_groups[tools_namespace].copy():
+            if run_id in self.tool_calls:
+                call_data = self.tool_calls[run_id]
+                
+                # 에러 정보 업데이트
+                call_data["output"] = error_message
+                call_data["error"] = error_message
+                call_data["finished"] = True
+                
+                if not call_data.get("end_time"):
+                    call_data["end_time"] = asyncio.get_event_loop().time()
+                
+                # self.completed_tools.add(run_id)
+                updated_calls.append(call_data)
+        
+        return updated_calls
+    
+    def _extract_error_message(self, error_event: Dict[str, Any]) -> str:
+        """
+        에러 이벤트에서 구체적인 에러 메시지 추출
+        
+        Args:
+            error_event: 에러 이벤트 객체
+            
+        Returns:
+            추출된 에러 메시지
+        """
+        # 기본 에러 메시지
+        default_message = "도구 실행 중 오류가 발생했습니다."
+        
+        chunk = error_event.get("data", {}).get("chunk", {})
+        if not isinstance(chunk, dict):
+            return default_message
+        
+        messages = chunk.get("messages", [])
+        for msg in messages:
+            if hasattr(msg, 'content') and msg.content:
+                return str(msg.content)
+        
+        return default_message
+    
+    def handle_unfinished_tools(self, timeout_seconds: float = 5.0) -> List[Dict[str, Any]]:
+        """
+        미완료 도구들을 타임아웃 처리
+        
+        스트림이 종료되었지만 아직 완료되지 않은 도구들을 찾아 타임아웃으로
+        처리합니다. 이는 예상치 못한 상황에서 UI가 무한 대기하는 것을 방지합니다.
+        
+        Args:
+            timeout_seconds: 타임아웃 기준 시간 (초)
+            
+        Returns:
+            타임아웃 처리된 도구 호출 데이터 리스트
+        """
+        unfinished = []
+        current_time = asyncio.get_event_loop().time()
+        
+        for call_data in self.tool_calls.values():
+            if call_data["finished"] or call_data["run_id"] in self.completed_tools:
+                continue
+                
+            execution_time = current_time - call_data["start_time"]
+            
+            # 타임아웃 메시지 설정
+            if execution_time > timeout_seconds:
+                call_data["output"] = f"ToolException: 도구 실행 타임아웃 ({execution_time:.1f}초)"
+                call_data["error"] = f"도구 실행이 {timeout_seconds}초를 초과하여 타임아웃되었습니다."
+            else:
+                call_data["output"] = "ToolException: 도구 실행이 정상적으로 완료되지 않았습니다."
+                call_data["error"] = "도구 실행이 정상적으로 완료되지 않았습니다."
+            
+            call_data["finished"] = True
+            call_data["end_time"] = current_time
+            self.completed_tools.add(call_data["run_id"])
+            unfinished.append(call_data)
+        
+        return unfinished
+    
+    def get_execution_summary(self) -> Dict[str, Any]:
+        """
+        실행 요약 정보 반환 (디버깅 및 모니터링용)
+        
+        Returns:
+            실행 통계 및 상태 정보
+        """
+        return {
+            "total_tools": len(self.tool_calls),
+            "completed_tools": len(self.completed_tools),
+            "tools_groups": {ns: list(run_ids) for ns, run_ids in self.tools_groups.items()},
+            "execution_times": {
+                run_id: call_data.get("end_time", 0) - call_data["start_time"]
+                for run_id, call_data in self.tool_calls.items()
+                if call_data.get("end_time")
+            }
+        }
+
+
+# =============================================================================
+# 에이전트 관리 함수
+# =============================================================================
 
 async def initialize_agent():
-    """에이전트를 비동기적으로 초기화하고 세션 상태에 저장합니다."""
+    """
+    LangChain 에이전트 초기화
+    
+    에이전트가 아직 초기화되지 않은 경우에만 build_agent()를 호출하여
+    새로운 에이전트 인스턴스를 생성하고 세션 상태에 저장합니다.
+    
+    중복 초기화 방지:
+    - 세션 상태를 확인하여 이미 초기화된 경우 재사용
+    - MCP 서버의 중복 실행을 방지하여 리소스 절약
+    """
     if st.session_state.agent is None:
-        with st.spinner("에이전트를 준비하는 중입니다..."):
-            st.session_state.agent = await build_agent()
+        with st.spinner("🔧 AI 쇼핑 어시스턴트를 준비하는 중입니다..."):
+            try:
+                # 에이전트 빌드 시도 (크레딧 절약 모드)
+                agent = await build_enhanced_agent("credit_saving")
+                
+                # 에이전트가 제대로 생성되었는지 확인
+                if agent is not None:
+                    st.session_state.agent = agent
+                    st.success("✅ 에이전트가 성공적으로 초기화되었습니다.")
+                    # 디버그: 에이전트 타입 확인
+                    st.info(f"🔍 에이전트 타입: {type(agent).__name__}")
+                    return True
+                else:
+                    st.error("❌ 에이전트 생성 실패: build_agent()가 None을 반환했습니다.")
+                    return False
+                    
+            except Exception as e:
+                st.error(f"❌ 에이전트 초기화 실패: {str(e)}")
+                st.info("페이지를 새로고침하거나 잠시 후 다시 시도해주세요.")
+                # 디버그: 상세 에러 정보
+                with st.expander("🐛 에러 상세 정보"):
+                    st.code(str(e))
+                return False
+    else:
+        # 이미 초기화된 경우
+        st.info("✅ 에이전트가 이미 초기화되어 있습니다.")
+        return True
 
-async def get_response(agent, user_input, history):
-    """에이전트로부터 답변과 진행 상황을 비동기적으로 스트리밍합니다."""
+
+def ensure_agent_ready() -> bool:
+    """
+    에이전트가 준비되었는지 확인하고 필요시 초기화
+    
+    이 함수는 사용자 입력 처리 전에 호출되어 에이전트가 
+    사용 가능한 상태인지 확인합니다.
+    
+    Returns:
+        에이전트 준비 상태 (True: 준비됨, False: 실패)
+    """
+    if st.session_state.agent is None:
+        # 동기 함수에서 비동기 함수 호출
+        return asyncio.run(initialize_agent())
+    return True
+
+
+# =============================================================================
+# 응답 스트리밍 함수
+# =============================================================================
+
+async def get_response(agent, user_input: str, history: List[Tuple[str, str]]):
+    """
+    에이전트로부터 응답을 스트리밍으로 받아 처리
+    
+    이 함수는 LangGraph의 astream_events를 사용하여 실시간으로 이벤트를 처리하고,
+    도구 실행 상태를 추적하며, 에러를 적절히 처리합니다.
+    
+    Args:
+        agent: LangChain 에이전트 인스턴스
+        user_input: 사용자 입력 메시지
+        history: 이전 대화 히스토리
+        
+    Yields:
+        다양한 타입의 이벤트 딕셔너리 (content, tool_start, tool_end, error 등)
+    """
+    
+    # 시스템 프롬프트 정의
     system_prompt = """당신은 사용자의 복합적인 쇼핑 요구사항을 지능적으로 분석하고, 단계적 검색 전략을 통해 즉시 구매 가능한 최적 상품을 찾아 추천하는 전문 쇼핑 어시스턴트입니다.
-🧠 지능형 요구사항 분석 시스템
-검색 키워드 우선순위 분석
-사용자 요청을 다음과 같이 분해하여 검색 전략 수립:
 
-🎯 핵심 키워드 (필수):
-- 상품 카테고리: 티셔츠, 운동화, 가방 등
-- 주요 스타일: 루즈핏, 오버핏, 슬림핏 등
-- 브랜드명: 나이키, 아디다스 등 (명시된 경우)
+# 💡 주요 기능
+- **지능형 요구사항 분석**: 사용자의 요청을 `핵심 키워드`, `필터링 조건`, `부가 조건`으로 분해하여 검색 전략 수립
+- **단계적 스마트 검색**: `기본 검색` → `유사어 확장` → `결과 필터링` → `구매 가능성 검증`의 4단계 프로세스 수행
+- **중복 상품 제거 및 다양성 확보**: 동일/유사 상품을 제거하고, `브랜드`, `가격대`, `스타일`의 다양성을 보장하여 최종 추천
+- **검색 실패시 지능형 대응**: 검색 결과가 부족할 경우, `키워드 변형`, `카테고리 확장`, `조건 완화` 등 단계적으로 검색 범위 확장
 
-🔧 필터링 조건 (선택):
-- 가격 범위: X만원 이하/이상
-- 사이즈: S, M, L, XL, 95, 100 등
-- 색상: 블랙, 화이트, 네이비 등
-- 성별/연령대: 남성, 여성, 20대, 30대 등
+# 📝 응답 형식
+- **검색 과정 투명화**: 사용자의 요청 분석 결과, 검색 단계, 필터링, 중복 제거 과정을 명확히 보고
+- **조건별 상품 분류 추천**: `완벽 조건 만족`, `주요 조건 만족`, `대안 추천` 등 조건 충족 수준에 따라 상품을 분류하여 제안
+- **다양성 보장된 최종 추천**: 각 상품의 `브랜드`, `상품명`, `가격`, `고유 특징`을 명시하고, 중복이 제거된 다양한 옵션을 제공
 
-🎨 부가 조건 (참고):
-- 용도: 데일리, 운동, 비즈니스 등
-- 계절성: 여름, 겨울, 사계절용 등
-- 소재: 면, 폴리에스터 등
-검색 전략 수립 예시
-사용자 요청: "30대 남자 루즈핏 티셔츠 100(L) 사이즈 5만원 이하"
-
-분석 결과:
-🎯 핵심 키워드: "루즈핏 티셔츠"
-🔧 필터링 조건: 
-   - 가격: 5만원 이하
-   - 사이즈: 100(L)
-   - 대상: 30대 남성용
-
-검색 전략:
-1차: "루즈핏 티셔츠" 기본 검색
-2차: "오버핏 티셔츠", "박시 티셔츠" 유사어 검색
-3차: 검색 결과를 가격/사이즈로 필터링
-4차: 30대 남성 스타일에 적합한지 검증
-🔍 단계적 스마트 검색 프로세스
-1단계: 핵심 키워드 기본 검색
-🔍 1차 검색 수행:
-- 핵심 상품명만으로 넓은 범위 검색
-- 지정 도메인에서 기본 검색 실행
-  "site:search.shopping.naver.com [핵심키워드]"
-  "site:shinsegaemall.ssg.com [핵심키워드]"
-  "site:musinsa.com [핵심키워드]"
-
-✅ 성공 조건: 
-- 관련 상품이 10개 이상 검색됨
-- 다양한 브랜드/가격대 상품 확인
-
-❌ 실패시 대응:
-- 2단계 유사어 검색으로 진행
-- 키워드 단순화 (수식어 제거)
-2단계: 유사어/동의어 확장 검색
-🔄 핵심 키워드별 유사어 매핑:
-
-티셔츠 관련:
-- 루즈핏 → 오버핏, 박시핏, 와이드핏, 여유핏
-- 슬림핏 → 타이트핏, 몸매핏, 스키니핏
-- 반팔티 → 티셔츠, 반소매, 카라티
-
-의류 스타일:
-- 캐주얼 → 데일리, 편안한, 일상
-- 스포티 → 운동, 스포츠, 애슬레저
-- 미니멀 → 심플, 베이직, 무지
-
-브랜드 카테고리:
-- 스트릿 브랜드 → 무신사 우선 검색
-- 프리미엄 → SSG몰 우선 검색
-- 대중적 브랜드 → 네이버쇼핑 우선 검색
-
-🔍 2차 검색 실행:
-각 유사어로 별도 검색 수행하여 결과 확장
-3단계: 결과 필터링 및 조건 매칭
-📊 수집된 상품들을 사용자 조건으로 필터링:
-
-가격 필터링:
-- 상품 페이지에서 실제 가격 확인
-- 할인가 기준으로 예산 범위 내 상품 선별
-- 배송비 포함 총액으로 재계산
-
-사이즈 필터링:
-- 상품 옵션에서 해당 사이즈 재고 확인
-- 사이즈 가이드 참고하여 실제 착용감 검증
-- 브랜드별 사이즈 차이 고려
-
-스타일 필터링:
-- 상품 상세 정보에서 핏/스타일 확인
-- 모델 착용 사진으로 실제 핏 검증
-- 리뷰에서 핏 관련 정보 수집
-
-대상 연령/성별 필터링:
-- 상품 설명에서 타겟 고객층 확인
-- 브랜드 포지셔닝 고려
-- 디자인/컬러가 요청 조건에 적합한지 판단
-4단계: 구매 가능성 최종 검증
-✅ 필터링된 상품들의 구매 가능성 검증:
-
-재고 상태:
-- "구매하기" 버튼 활성화 상태
-- 원하는 사이즈/색상 재고 보유
-- 즉시 배송 가능 여부
-
-가격 정확성:
-- 표시 가격과 실제 결제 가격 일치
-- 추가 할인/쿠폰 적용 가능 여부
-- 배송비 포함 최종 금액
-
-품질 검증:
-- 리뷰 점수 및 구매 후기
-- 브랜드 신뢰도
-- A/S 및 교환/환불 정책
-🚫 중복 상품 제거 및 다양성 보장 시스템
-중복 상품 식별 기준
-🔍 동일 상품 판별 조건:
-
-완전 중복 (제거 대상):
-- 동일한 브랜드 + 동일한 모델명
-- 같은 상품이 여러 플랫폼에서 판매되는 경우
-- 동일한 판매자가 다른 페이지에서 판매
-- 색상만 다르고 나머지가 동일한 경우
-
-유사 중복 (신중 판단):
-- 같은 브랜드의 매우 유사한 디자인
-- 거의 동일한 가격대의 비슷한 상품
-- 동일한 카테고리에서 차별점이 미미한 상품
-
-허용 가능한 유사성:
-- 다른 브랜드의 비슷한 스타일 (차별화 포인트 명시)
-- 같은 브랜드라도 확실히 다른 라인/컬렉션
-- 가격대가 20% 이상 차이나는 상품
-- 뚜렷한 기능/디자인 차이가 있는 상품
-다양성 확보 전략
-🎯 추천 상품 다양성 기준:
-
-브랜드 다양성:
-- 최대 2개 이상의 서로 다른 브랜드 포함
-- 프리미엄/중가/보급형 브랜드 믹스
-- 국내/해외 브랜드 균형
-
-가격대 다양성:
-- 예산 범위 내에서 최소 3개 가격 구간
-- 최저가, 중간가, 최고가 옵션 제공
-- 가격 차이는 최소 15-20% 이상
-
-스타일 다양성:
-- 같은 카테고리 내에서도 다른 디자인/컬러
-- 캐주얼/세미캐주얼/포멀 등 다양한 스타일
-- 클래식/트렌디/유니크 등 다른 무드
-
-기능 다양성:
-- 기본 기능 외 추가 기능이 다른 상품들
-- 소재나 제조 방식이 다른 상품들
-- 계절성이나 용도가 다른 상품들
-중복 제거 프로세스
-🔄 단계별 중복 제거 과정:
-
-1단계: 자동 중복 탐지
-- 상품명 유사도 분석 (80% 이상 유사시 검토)
-- 브랜드명 + 모델명 조합 확인
-- 가격 유사도 확인 (±10% 범위)
-- 판매자 정보 교차 확인
-
-2단계: 수동 검증
-- 상품 상세 정보 비교
-- 이미지 유사도 확인 (가능한 경우)
-- 기능/사양 차이점 분석
-- 실제 다른 상품인지 최종 판단
-
-3단계: 우선순위 기반 선별
-중복 발견시 다음 기준으로 하나만 선택:
-- 더 저렴한 가격의 상품
-- 더 빠른 배송이 가능한 상품
-- 더 높은 리뷰 점수의 상품
-- 더 신뢰할 수 있는 판매자의 상품
-
-4단계: 대체 상품 검색
-제거된 중복 상품 수만큼 새로운 다양한 상품 검색:
-- 다른 브랜드에서 유사한 상품 찾기
-- 다른 가격대에서 대안 상품 검색
-- 다른 스타일의 상품으로 확장
-다양성 검증 체크리스트
-✅ 최종 추천 전 다양성 확인:
-
-브랜드 체크:
-[ ] 최소 2개 이상의 서로 다른 브랜드
-[ ] 같은 브랜드는 최대 2개까지만 허용
-[ ] 브랜드별 뚜렷한 차별화 포인트 존재
-
-가격 체크:
-[ ] 추천 상품간 최소 15% 이상 가격 차이
-[ ] 예산 범위를 3분할한 각 구간에 상품 존재
-[ ] 최저가와 최고가 사이에 합리적 분포
-
-스타일 체크:
-[ ] 색상이 모두 다르거나 의미있는 차이점 존재
-[ ] 디자인/핏/실루엣에서 뚜렷한 구별점
-[ ] 동일한 무드/스타일 3개 이상 연속 금지
-
-기능 체크:
-[ ] 각 상품만의 고유한 장점이나 특징 존재
-[ ] 소재/제조방식/브랜드 컨셉에서 차별화
-[ ] 사용자에게 다양한 선택 옵션 제공
-🎯 검색 실패시 지능형 대응 전략
-단계적 범위 확장 전략
-🔄 검색 결과 부족시 자동 확장:
-
-1단계 확장: 키워드 변형
-- "루즈핏 티셔츠" → "오버핏 티셔츠"
-- "100 사이즈" → "L사이즈" 또는 "라지"
-- "5만원 이하" → "저렴한" 또는 가격 조건 완화
-
-2단계 확장: 카테고리 확장  
-- "루즈핏 티셔츠" → "반팔티", "긴팔티" 포함
-- 브랜드 범위 확대
-- 스타일 범위 확대
-
-3단계 확장: 조건 완화
-- 가격 범위 20% 상향 조정
-- 인접 사이즈 포함 (95, 105 등)
-- 유사한 연령대로 확장
-
-4단계 확장: 대체 상품 제안
-- 완전히 다른 아이템이지만 비슷한 용도
-- 세트 상품이나 패키지 상품
-- 시즌 상품이나 기획 상품
-검색 결과 분석 및 재전략
-📈 검색 성과 분석:
-
-결과 분석 지표:
-- 총 검색된 상품 수
-- 조건 만족 상품 비율
-- 구매 가능한 상품 수
-- 평균 가격대 분포
-
-재전략 수립:
-- 부족한 조건 식별
-- 사용자 요구사항 재해석
-- 검색 키워드 최적화
-- 플랫폼별 특성 고려한 검색 방법 조정
-
-예시:
-"무신사에서 루즈핏 검색 결과가 부족하다면 
-→ 네이버쇼핑에서 '박시핏' 키워드로 재검색
-→ SSG몰에서 프리미엄 브랜드 루즈핏 검색"
-💡 스마트 추천 응답 형식 (중복 방지)
-검색 과정 투명화
-🔍 검색 및 중복 제거 과정 보고:
-
-"요청하신 조건을 분석하여 다음과 같이 검색을 수행했습니다:
-
-🎯 핵심 키워드: '루즈핏 티셔츠'
-🔧 필터 조건: 5만원 이하, L사이즈, 30대 남성
-📊 검색 결과: 
-   • 1차 검색: 루즈핏 티셔츠 → 23개 상품 발견
-   • 2차 확장: 오버핏 티셔츠 → 31개 추가 발견  
-   • 필터링 후: 조건 만족 상품 8개 선별
-   • 중복 제거: 동일/유사 상품 3개 제거
-   • 다양성 확보: 서로 다른 브랜드 5개 최종 선별
-   • 구매 가능: 최종 5개 상품 확인"
-
-🚫 제거된 중복 상품 예시:
-   • 유니클로 에어리즘 오버사이즈 티셔츠 (네이버/SSG 동일 상품)
-   • 무지 루즈핏 라운드넥 (색상만 다른 동일 모델)
-조건별 상품 분류 추천 (중복 제거 완료)
-✅ 다양성 보장된 추천 리스트:
-
-🏆 완벽 조건 만족 (1순위):
-- 모든 조건을 100% 충족하는 상품
-- 즉시 구매 가능한 베스트 매치
-- [브랜드A] [상품명] - [가격] (고유 특징 명시)
-
-🥈 주요 조건 만족 (2순위):  
-- 핵심 조건은 만족하나 일부 조건 미충족
-- [브랜드B] [상품명] - [가격] (차별화 포인트 명시)
-- 예: 가격 5천원 초과하지만 프리미엄 소재
-
-🥉 대안 추천 (3순위):
-- [브랜드C] [상품명] - [가격] (독특한 장점 명시)
-- 조건은 다르지만 더 나은 가치 제공
-- 예: 예산 초과하지만 세일 중인 프리미엄 브랜드
-
-💡 추가 제안 (각기 다른 컨셉):
-- [브랜드D] 비슷한 스타일의 다른 아이템
-- [브랜드E] 세트 구매시 더 저렴한 옵션
-- [브랜드F] 곧 출시될 신상품 정보
-
-⚠️ 중복 제거 완료:
-- 위 추천 상품들은 모두 서로 다른 브랜드/모델
-- 각 상품별 고유한 장점과 차별화 포인트 보유
-- 가격대별/스타일별 다양성 확보
-🔧 검색 최적화 규칙
-플랫폼별 검색 전략
-🛍️ 네이버쇼핑:
-- 가격 비교에 특화
-- 다양한 판매자 비교 가능
-- 할인/이벤트 정보 풍부
-- 검색어: 구체적 상품명 + 브랜드
-
-🏬 SSG몰:
-- 프리미엄 브랜드 특화
-- 백화점 브랜드 집중
-- 품질 중심 상품군
-- 검색어: 브랜드명 + 스타일
-
-👕 무신사:
-- 패션/스트릿웨어 특화
-- 스타일링 정보 풍부
-- 젊은 층 타겟 브랜드
-- 검색어: 트렌드 키워드 + 스타일핏
-시간 효율성 최적화
-⏰ 검색 시간 관리:
-
-빠른 판단 기준:
-- 1차 검색에서 적합한 상품 3개 이상 발견시 조건 필터링 진행
-- 검색 결과가 없거나 1-2개 미만시 즉시 키워드 확장
-- 5분 내 결과 도출을 목표로 효율적 검색
-
-우선순위 설정:
-- 사용자가 강조한 조건을 최우선 고려
-- 예산은 20% 여유 범위 내에서 탄력적 적용
-- 브랜드보다는 스타일/핏을 우선시
-
-품질 vs 속도:
-- 완벽한 매치를 찾기보다는 85% 이상 만족하는 상품 우선 추천
-- 중복 제거를 통한 다양성 확보 필수
-- 추가 옵션은 "더 찾아볼까요?" 형태로 제안
-
-중복 방지 원칙:
-- 동일 브랜드 상품은 최대 2개까지만 추천
-- 각 추천 상품은 뚜렷한 차별화 포인트 보유 필수
-- 가격/스타일/기능에서 의미있는 다양성 제공
+# 🔧 검색 최적화 규칙
+- **플랫폼별 검색 전략**: `네이버쇼핑`(가격 비교), `SSG몰`(프리미엄), `무신사`(패션/트렌드) 등 플랫폼 특성에 맞는 검색 수행
+- **시간 효율성 최적화**: 5분 내 결과 도출을 목표로, 빠른 판단과 우선순위 설정에 기반한 효율적 검색 진행
 """
-    messages = [("system", system_prompt)] + history + [("user", user_input)]
+    
+    # 도구 실행 추적기 초기화
+    tracker = ToolExecutionTracker()
+    
+    # Enhanced Agent 상태 구성
+    initial_state = {
+        "user_query": user_input,
+        "messages": [("system", system_prompt)] + history + [("user", user_input)],
+        "processing_status": "시작"
+    }
 
-    async for event in agent.astream_events({"messages": messages}, version="v1"):
-        kind = event["event"]
-        if kind == "on_chat_model_stream":
-            content = event["data"]["chunk"].content
-            if content:
-                yield {"type": "content", "data": content}
-        elif kind == "on_tool_start":
-            yield {
-                "type": "tool_start",
-                "run_id": str(event['run_id']),
-                "name": event['name'],
-                "input": event['data'].get('input')
-            }
-        elif kind == "on_tool_end":
-            yield {
-                "type": "tool_end",
-                "run_id": str(event['run_id']),
-                "name": event['name'],
-                "output": event['data'].get('output')
-            }
+    try:
+        # LangGraph 이벤트 스트림 처리
+        async for event in agent.astream_events(initial_state, version="v1"):
+            event_type = event["event"]
+            # print(f"event: {event}")
+            
+            if event_type == "on_chat_model_stream":
+                # LLM 응답 텍스트 스트리밍
+                content = event["data"]["chunk"].content
+                if content:
+                    yield {"type": "content", "data": content}
+                    
+            elif event_type == "on_tool_start":
+                # 도구 실행 시작
+                run_id = str(event['run_id'])
+                tool_name = event['name']
+                tool_input = event['data'].get('input')
+                
+                call_data = tracker.start_tool_execution(run_id, tool_name, tool_input, event)
+                
+                yield {
+                    "type": "tool_start",
+                    "run_id": run_id,
+                    "name": tool_name,
+                    "input": tool_input,
+                    "call_data": call_data
+                }
+                
+            elif event_type == "on_tool_end":
+                print(f"event tool end: {event}")
+                # 도구 실행 완료
+                run_id = str(event['run_id'])
+                tool_output = event['data'].get('output')
+                
+                updated_call_data = tracker.finish_tool_execution(run_id, tool_output)
+                
+                if updated_call_data:
+                    yield {
+                        "type": "tool_end",
+                        "run_id": run_id,
+                        "name": updated_call_data['name'],
+                        "output": updated_call_data['output'],
+                        "call_data": updated_call_data
+                    }
+                    
+            elif event_type == "on_chain_stream" and event["metadata"].get("langgraph_node") == "tools":
+                print(f"event on_chain_stream tools: {event}")
+
+                
+                chunk = event.get("data", {}).get("chunk", {})
+                messages = chunk.get("messages", [])
+
+                for msg in messages:
+                    if isinstance(msg, ToolMessage) and hasattr(msg, 'status') and msg.status == 'error':
+                        updated_cells = tracker.handle_group_error(event)
+
+                        for call_data in updated_cells:
+                            yield { 
+                                "type": "tool_error",
+                                "run_id": call_data["run_id"],
+                                "tool_name": call_data["name"],
+                                "error_message": call_data["error"],
+                                "call_data": call_data,
+                                "tools_namespace": call_data.get("tools_namespace")                                
+                            }
+                
+                
+            elif event_type == "on_chat_model_start":
+                print(f"on_chat_model_start: {event}")
+        
+                                
+    except Exception as e:
+        # 예상치 못한 에러 처리
+        error_message = f"응답 스트림 처리 중 오류가 발생했습니다: {str(e)}"
+        yield {
+            "type": "stream_error",
+            "error": error_message,
+            "traceback": traceback.format_exc()
+        }
+
+
+# =============================================================================
+# UI 렌더링 함수
+# =============================================================================
+
+def render_tool_call(call_data: Dict[str, Any]) -> None:
+    """
+    도구 호출 정보를 Streamlit UI로 렌더링
+    
+    도구의 이름, 입력, 출력, 실행 시간, 에러 정보 등을 사용자가 이해하기 쉽게
+    표시합니다. 에러가 있는 경우 시각적으로 구분하여 표시합니다.
+    
+    Args:
+        call_data: 렌더링할 도구 호출 데이터
+    """
+    tool_name = call_data['name']
+    tool_input = call_data.get('input', {})
+    output = call_data.get('output')
+    error = call_data.get('error')
+    tools_namespace = call_data.get('tools_namespace', 'Unknown')
+    is_error = error is not None or (isinstance(output, str) and 'ToolException' in output)
+
+    # 실행 시간 계산 및 표시
+    execution_time = ""
+    if call_data.get('start_time') and call_data.get('end_time'):
+        duration = call_data['end_time'] - call_data['start_time']
+        execution_time = f" ({duration:.2f}초)"
+
+    # 도구 입력에 따른 요약 정보 생성
+    summary = _generate_tool_summary(tool_name, tool_input)
+
+    # 기본 정보 표시
+    st.markdown(f'**도구:** `{tool_name}`{summary}{execution_time}')
+    st.markdown(f'**그룹:** `{tools_namespace}`')
+
+    # 에러 상태인 경우 경고 메시지 표시
+    if is_error:
+        st.error(f"⚠️ 도구 실행 실패: {error or output}")
+
+    # 상세 정보를 확장 가능한 섹션으로 표시
+    with st.expander("상세 정보 보기"):
+        st.markdown("##### 입력 데이터")
+        st.code(json.dumps(tool_input, indent=2, ensure_ascii=False), language='json')
+        
+        if call_data.get("finished"):
+            st.markdown("##### 실행 결과")
+            _render_tool_output(output, error, is_error)
+
+
+def _generate_tool_summary(tool_name: str, tool_input: Dict[str, Any]) -> str:
+    """
+    도구 입력에 기반한 요약 정보 생성
+    
+    Args:
+        tool_name: 도구 이름
+        tool_input: 도구 입력 데이터
+        
+    Returns:
+        생성된 요약 문자열
+    """
+    if not isinstance(tool_input, dict):
+        return ''
+    
+    if tool_name == 'firecrawl.scrape' and 'url' in tool_input:
+        return f" - `{tool_input['url']}`"
+    elif tool_name == 'firecrawl.search' and 'query' in tool_input:
+        return f" - `{tool_input['query']}`"
+    
+    return ''
+
+
+def _render_tool_output(output: Any, error: str, is_error: bool) -> None:
+    """
+    도구 출력 결과 렌더링
+    
+    Args:
+        output: 도구 출력
+        error: 에러 메시지
+        is_error: 에러 상태 여부
+    """
+    print(f"output: {output}")
+    if is_error:
+        st.markdown("**에러 상세:**")
+        error_text = error or output
+        st.code(error_text, language='text')
+    elif output is None:
+        st.markdown("_(출력 없음)_")
+    elif isinstance(output, ToolMessage):
+        st.code(output.content)
+    elif isinstance(output, str):
+        # 긴 텍스트는 일부만 표시
+        display_output = output
+        if len(output) > 1000:
+            display_output = output[:1000] + "\n... (내용이 너무 길어 일부만 표시합니다)"
+        st.code(display_output, language='text')
+    elif isinstance(output, (dict, list)):
+        st.code(json.dumps(output, indent=2, ensure_ascii=False), language='json')
+    else:
+        st.code(str(output), language='text')
+
+
+def determine_tool_status(call_data: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    도구 상태에 따른 UI 상태 및 텍스트 결정
+    
+    Args:
+        call_data: 도구 호출 데이터
+        
+    Returns:
+        (상태 텍스트, UI 상태) 튜플
+    """
+    is_error = (call_data.get('error') is not None or 
+               (isinstance(call_data.get('output'), str) and 
+                'ToolException' in call_data.get('output', '')))
+    
+    if not call_data.get('finished'):
+        return "실행 중", "running"
+    elif is_error:
+        return "실패", "error"
+    else:
+        return "완료", "complete"
+
+
+# =============================================================================
+# UI 스트리밍 처리 함수
+# =============================================================================
+
+async def stream_and_update_ui(response_stream, message_container):
+    """
+    응답 스트림을 처리하고 실시간으로 UI를 업데이트
+    
+    이 함수는 에이전트의 응답 스트림을 받아서 텍스트는 실시간으로 표시하고,
+    도구 실행 상태는 별도의 상태 컴포넌트로 시각화합니다.
+    
+    Args:
+        response_stream: 에이전트 응답 스트림 이터레이터
+        message_container: Streamlit 컨테이너 객체
+        
+    Returns:
+        메시지 구성 요소 리스트 (텍스트 및 도구 호출 정보)
+    """
+    # UI 상태 관리 변수들
+    message_parts = []  # 최종적으로 저장될 메시지 구성 요소들
+    active_tool_ui = {}  # 현재 활성화된 도구 UI 컴포넌트들 {run_id: (placeholder, status_ui, call_data)}
+    
+    # 텍스트 스트리밍을 위한 플레이스홀더
+    current_text_placeholder = message_container.empty()
+    current_text_content = ""
+
+    async for event in response_stream:
+        event_type = event["type"]
+        
+        if event_type == "content":
+            # LLM 텍스트 응답 스트리밍 처리
+            current_text_content += event["data"]
+            # 커서 표시를 위해 '▌' 문자 추가
+            current_text_placeholder.markdown(current_text_content + "▌")
+
+        elif event_type == "tool_start":
+            # 도구 실행 시작 시 UI 처리
+            # 1. 현재까지의 텍스트를 확정하여 표시
+            if current_text_content:
+                current_text_placeholder.markdown(current_text_content)
+                message_parts.append({"type": "text", "data": current_text_content})
+                current_text_content = ""
+
+            # 2. 도구 호출 데이터를 메시지 파트에 추가
+            call_data = event["call_data"]
+            message_parts.append({"type": "tool_call", "data": call_data})
+            
+            # 3. 도구 실행 상태를 위한 UI 컴포넌트 생성
+            status_placeholder = message_container.empty()
+            with status_placeholder:
+                status_ui = st.status(f"도구 실행 중: {event['name']}", expanded=True)
+                with status_ui:
+                    render_tool_call(call_data)
+            
+            # 활성 도구 UI 목록에 추가
+            active_tool_ui[event["run_id"]] = (status_placeholder, status_ui, call_data)
+
+            # 4. 다음 텍스트를 위한 새로운 플레이스홀더 생성
+            current_text_placeholder = message_container.empty()
+        
+        elif event_type == "tool_end":
+            # 도구 실행 완료 시 UI 업데이트
+            run_id = event["run_id"]
+            updated_call_data = event["call_data"]
+            if run_id in active_tool_ui:
+                status_placeholder, status_ui, old_call_data = active_tool_ui[run_id]
+                
+                # 기존 데이터를 새로운 데이터로 업데이트
+                old_call_data.update(updated_call_data)
+                # 도구 상태 결정
+                status_text, status_state = determine_tool_status(updated_call_data)
+
+                # UI 업데이트 (확장하지 않은 상태로 변경)
+                status_placeholder.empty()
+                with status_placeholder:
+                    with st.status(f"도구 {status_text}: {updated_call_data['name']}", 
+                                 expanded=False, state=status_state):
+                        render_tool_call(updated_call_data)
+                
+                # 완료된 도구는 활성 목록에서 제거
+                active_tool_ui.pop(run_id)
+
+        elif event_type == "tool_error":
+            # 도구 에러 및 타임아웃 처리
+            run_id = event["run_id"]
+            updated_call_data = event["call_data"]
+
+            if run_id in active_tool_ui:
+                status_placeholder, status_ui, old_call_data = active_tool_ui[run_id]
+                
+                # 데이터 업데이트
+                old_call_data.update(updated_call_data)
+
+                # UI 업데이트
+                status_placeholder.empty()
+                with status_placeholder:
+                    with st.status(f"도구 오류 : {updated_call_data['name']}", 
+                                 expanded=False, state="error"):
+                        render_tool_call(updated_call_data)
+                
+                active_tool_ui.pop(run_id)
+        
+        elif event_type == "stream_error":
+            # 스트림 처리 에러 표시
+            st.error(f"⚠️ 응답 처리 중 오류가 발생했습니다: {event['error']}")
+            if event.get('traceback'):
+                with st.expander("오류 상세 정보"):
+                    st.code(event['traceback'], language='text')
+
+        # UI 반응성을 위한 짧은 대기
+        await asyncio.sleep(0.01)
+
+    # 스트림 종료 후 정리 작업
+    # 1. 남은 텍스트 확정
+    if current_text_content:
+        current_text_placeholder.markdown(current_text_content)
+        message_parts.append({"type": "text", "data": current_text_content})
+    
+    # 2. 아직 완료되지 않은 도구들 강제 완료 처리
+    for run_id, (status_placeholder, status_ui, call_data) in active_tool_ui.items():
+        if not call_data.get("finished"):
+            # 미완료 도구를 실패로 처리
+            call_data["output"] = "ToolException: 도구 실행이 정상적으로 완료되지 않았습니다."
+            call_data["error"] = "도구 실행이 정상적으로 완료되지 않았습니다."
+            call_data["finished"] = True
+            call_data["end_time"] = asyncio.get_event_loop().time()
+            
+            # UI 업데이트
+            status_placeholder.empty()
+            with status_placeholder:
+                with st.status(f"도구 미완료: {call_data['name']}", 
+                             expanded=False, state="error"):
+                    render_tool_call(call_data)
+    
+    return message_parts
+
+
+def generate_history_summary(message_parts: List[Dict[str, Any]]) -> str:
+    """
+    메시지 파트들로부터 대화 히스토리용 요약 생성
+    
+    텍스트 응답과 도구 실행 결과를 종합하여 대화 히스토리에 저장할
+    요약 메시지를 생성합니다.
+    
+    Args:
+        message_parts: 메시지 구성 요소 리스트
+        
+    Returns:
+        생성된 요약 메시지
+    """
+    # 텍스트 부분만 추출하여 연결
+    text_response = "".join([
+        part["data"] for part in message_parts if part["type"] == "text"
+    ])
+    
+    # 텍스트 응답이 있으면 그대로 반환
+    if text_response.strip():
+        return text_response
+    
+    # 텍스트 응답이 없고 도구만 사용된 경우 요약 생성
+    tool_calls = [part for part in message_parts if part["type"] == "tool_call"]
+    if not tool_calls:
+        return "응답을 생성하지 못했습니다."
+    
+    tool_count = len(tool_calls)
+    failed_tools = sum(1 for part in tool_calls 
+                     if (part["data"].get("error") is not None or 
+                         (isinstance(part["data"].get("output"), str) and 
+                          'ToolException' in part["data"].get("output", ""))))
+    
+    # 도구 실행 결과에 따른 요약 메시지 생성
+    if failed_tools == tool_count:
+        return f"요청을 처리하기 위해 {tool_count}개의 도구를 사용했지만 모두 실패했습니다."
+    elif failed_tools > 0:
+        return f"{tool_count}개의 도구를 사용했습니다. ({failed_tools}개 실패)"
+    else:
+        return f"{tool_count}개의 도구를 성공적으로 사용했습니다."
+
+
+# =============================================================================
+# 메인 애플리케이션
+# =============================================================================
 
 def main():
-    """Streamlit 앱의 메인 함수입니다.
-"""
+    """
+    Streamlit 애플리케이션의 메인 진입점
+    
+    이 함수는 전체 애플리케이션의 UI를 구성하고 사용자 인터랙션을 처리합니다.
+    채팅 인터페이스, 메시지 히스토리 표시, 새로운 메시지 처리 등을 담당합니다.
+    
+    에이전트 초기화 최적화:
+    - 앱 시작 시 한 번만 초기화
+    - 사용자 입력 시 추가 초기화 방지
+    """
+    # 애플리케이션 헤더
     st.title("🛍️ AI 쇼핑 어시스턴트")
     st.markdown("무엇을 찾아드릴까요? 원하는 상품에 대해 자세히 알려주세요.")
 
-    # 비동기 이벤트 루프 설정
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    # 디버그 정보 표시 (개발 시에만 사용)
+    with st.expander("🔧 시스템 상태", expanded=False):
+        # 에이전트 상태 상세 확인
+        agent_obj = st.session_state.agent
+        if agent_obj is not None:
+            agent_status = f"✅ 준비됨 ({type(agent_obj).__name__})"
+            st.write(f"**에이전트 상태:** {agent_status}")
+            st.write(f"**에이전트 객체 ID:** {id(agent_obj)}")
+        else:
+            agent_status = "❌ 미준비"
+            st.write(f"**에이전트 상태:** {agent_status}")
+            st.write("**에이전트 객체:** None")
+        
+        st.write(f"**대화 기록:** {len(st.session_state.messages)}개 메시지")
+        st.write(f"**히스토리:** {len(st.session_state.history)}개 항목")
+        
+        # 세션 상태 전체 확인 (디버그용)
+        with st.expander("🔍 전체 세션 상태"):
+            st.json({
+                "agent_exists": st.session_state.agent is not None,
+                "agent_type": str(type(st.session_state.agent)) if st.session_state.agent else "None",
+                "messages_count": len(st.session_state.messages),
+                "history_count": len(st.session_state.history)
+            })
 
-    # 에이전트 초기화
+    # 에이전트 초기화 (앱 시작 시 한 번만)
     if st.session_state.agent is None:
-        loop.run_until_complete(initialize_agent())
+        # 초기화 시도
+        initialization_success = asyncio.run(initialize_agent())
+        if not initialization_success:
+            st.warning("⚠️ 에이전트 초기화가 실패했습니다. 일부 기능이 제한될 수 있습니다.")
+            return  # 초기화 실패 시 더 이상 진행하지 않음
+        else:
+            # 초기화 성공 시 UI 새로고침으로 상태 반영
+            st.rerun()
 
-    # 대화 내용 표시
+    # 에이전트가 준비된 후에만 UI 표시
+    if st.session_state.agent is not None:
+        # 이전 대화 내용 표시
+        display_conversation_history()
+        
+        # 사용자 입력 처리
+        handle_user_input()
+    else:
+        st.info("🔄 에이전트를 초기화하는 중입니다. 잠시만 기다려주세요.")
+        st.button("🔄 다시 시도", on_click=lambda: st.rerun())
+
+
+def display_conversation_history():
+    """
+    이전 대화 내용을 화면에 표시
+    
+    세션 상태에 저장된 메시지 히스토리를 순회하며 각 메시지를
+    적절한 형태로 렌더링합니다.
+    """
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            if message["role"] == "assistant" and message.get("parts"):
+                # 어시스턴트 메시지의 각 파트를 순서대로 표시
+                for part in message["parts"]:
+                    if part["type"] == "text":
+                        st.markdown(part["data"])
+                    elif part["type"] == "tool_call":
+                        # 도구 호출 정보를 상태 컴포넌트로 표시
+                        call_data = part["data"]
+                        status_text, status_state = determine_tool_status(call_data)
 
-    # 사용자 입력
+                        with st.status(f"도구 {status_text}: {call_data['name']}", 
+                                     expanded=False, state=status_state):
+                            render_tool_call(call_data)
+            else:
+                # 사용자 메시지는 단순 텍스트로 표시
+                st.markdown(message.get("content", ""))
+
+
+def handle_user_input():
+    """
+    사용자 입력을 처리하고 응답을 생성
+    
+    사용자가 새로운 메시지를 입력했을 때 호출되며,
+    에이전트에게 질의하고 실시간으로 응답을 표시합니다.
+    
+    에이전트 상태 확인:
+    - 입력 처리 전 에이전트 준비 상태 검증
+    - 에이전트가 없는 경우 안전하게 처리
+    """
+    # 사용자 입력 받기
     if prompt := st.chat_input("여기에 질문을 입력하세요..."):
+        
+        # 에이전트 준비 상태 확인
+        if not st.session_state.agent:
+            st.error("❌ 에이전트가 준비되지 않았습니다. 페이지를 새로고침해주세요.")
+            return
+        
+        # 사용자 메시지를 히스토리에 추가
         st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # 사용자 메시지 표시
         with st.chat_message("user"):
             st.markdown(prompt)
 
+        # 어시스턴트 응답 영역
         with st.chat_message("assistant"):
-            # Tool log container first
-            tool_log_container = st.expander("작업 진행 상황", expanded=True)
-            log_display = tool_log_container.empty()
-
-            # Then response container
-            response_container = st.empty()
-
-            response_stream = get_response(st.session_state.agent, prompt, st.session_state.history)
+            message_container = st.container()
             
-            tool_calls = []
+            try:
+                # 응답 스트림 생성
+                response_stream = get_response(
+                    st.session_state.agent, 
+                    prompt, 
+                    st.session_state.history
+                )
+                
+                # 실시간 UI 업데이트 및 메시지 파트 수집
+                message_parts = asyncio.run(stream_and_update_ui(response_stream, message_container))
 
-            async def stream_and_update_ui():
-                full_response = ""
-                async for event in response_stream:
-                    if event["type"] == "content":
-                        full_response += event["data"]
-                        response_container.markdown(full_response + "▌")
-                    
-                    elif event["type"] == "tool_start":
-                        tool_calls.append({
-                            "run_id": event["run_id"],
-                            "name": event["name"],
-                            "input": event["input"],
-                            "output": None,
-                            "finished": False,
-                        })
-                    
-                    elif event["type"] == "tool_end":
-                        for tc in tool_calls:
-                            if tc["run_id"] == event["run_id"]:
-                                tc["output"] = event["output"]
-                                tc["finished"] = True
-                                break
-                    
-                    if event["type"].startswith("tool"):
-                        log_content = ""
-                        for call in tool_calls:
-                            log_content += f"---<br>**Tool:** `{call['name']}`<br>"
-                            
-                            input_str = json.dumps(call['input'], indent=2, ensure_ascii=False)
-                            log_content += f"<details><summary>입력 보기</summary><pre><code>{input_str}</code></pre></details><br>"
+                # 어시스턴트 메시지를 세션에 저장
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "parts": message_parts
+                })
 
-                            if call["finished"]:
-                                output_str = str(call['output'])
-                                if len(output_str) > 2000:
-                                    output_str = output_str[:2000] + "... (결과가 너무 길어 일부만 표시합니다)"
-                                log_content += f"✅ *완료*<br><details><summary>결과 보기</summary><pre><code>{output_str}</code></pre></details><br>"
-                            else:
-                                log_content += "⏳ *실행 중...*<br>"
-                        
-                        log_display.markdown(log_content, unsafe_allow_html=True)
-                    
-                    await asyncio.sleep(0) 
+                # LangChain 히스토리 업데이트
+                assistant_summary = generate_history_summary(message_parts)
+                st.session_state.history.append(("user", prompt))
+                st.session_state.history.append(("assistant", assistant_summary))
 
-                response_container.markdown(full_response) # Final update for model response
-                if not tool_calls:
-                    tool_log_container.empty()
-                return full_response
+            except Exception as e:
+                st.error(f"❌ 응답 생성 중 오류가 발생했습니다: {str(e)}")
+                st.info("다시 시도해주세요.")
 
-            full_response = loop.run_until_complete(stream_and_update_ui())
-
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
-        
-        st.session_state.history.append(("user", prompt))
-        st.session_state.history.append(("assistant", full_response))
-        
+        # 페이지 새로고침으로 UI 상태 정리
         st.rerun()
 
 
+# =============================================================================
+# 애플리케이션 진입점
+# =============================================================================
 
 if __name__ == "__main__":
     main()

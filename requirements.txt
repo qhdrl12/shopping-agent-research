@@ -1,0 +1,9 @@
+firecrawl-py
+langchain-openai
+langchain-community
+langchain
+langgraph
+python-dotenv
+faiss-cpu
+langchain-firecrawl
+streamlit
