@@ -21,8 +21,8 @@ import traceback
 from dotenv import load_dotenv
 from langchain_core.messages import ToolMessage
 from typing import Dict, Any, List, Optional, Set, Tuple
-# from agent.enhanced_shopping_agent import build_enhanced_agent as build_agent
-from src.agent.shopping_react_agent import build_agent
+from src.agent.enhanced_shopping_agent import build_enhanced_agent as build_agent
+# from src.agent.shopping_react_agent import build_agent
 
 load_dotenv()
 
