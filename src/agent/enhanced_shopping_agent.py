@@ -1,6 +1,26 @@
 """
-Enhanced Shopping Agent with Pre-Search and Pre-Scraping
-LangGraph를 사용한 단일 에이전트 + 사전 검색/스크래핑 파이프라인
+Enhanced Shopping Agent with Pre-Search and Pre-Scraping Pipeline
+
+이 모듈은 LangGraph를 기반으로 구축된 고급 쇼핑 추천 에이전트를 제공합니다.
+기존 React Agent와 달리 구조화된 4단계 파이프라인을 통해 더 정확하고 상세한 쇼핑 추천을 제공합니다.
+
+주요 특징:
+- 📊 구조화된 질문 분석 (Structured Output 활용)
+- 🔍 설정 기반 사전 검색 (Tavily API)
+- 🕷️ 스마트한 URL 선별 및 스크래핑 (Firecrawl API)
+- 🎯 컨텍스트 기반 최종 추천 생성
+- 🎨 UI 친화적 도구 추적 (LangGraph astream_events 활용)
+
+워크플로우:
+1. analyze_query: 사용자 질문을 구조화된 정보로 분석
+2. pre_search: Tavily를 통한 관련 정보 수집
+3. pre_scrape: Firecrawl을 통한 상세 콘텐츠 수집
+4. react_agent: 수집된 정보를 바탕으로 전문적 추천 제공
+
+개선된 UI 추적:
+- 각 도구 호출이 on_tool_start/end 이벤트를 발생시켜 실시간 UI 추적 가능
+- React Agent와 동일한 도구 이력 표시 경험 제공
+- Human → ToolMessage → AI 순서의 일관된 메시지 플로우
 """
 
 import os
@@ -16,10 +36,11 @@ from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.prebuilt import create_react_agent
+# from langgraph.prebuilt import create_react_agent  # 더 이상 사용하지 않음
 
-from tavily import TavilyClient
-from firecrawl import FirecrawlApp
+# 외부 API 클라이언트들은 이제 개별 도구 파일에서 관리됩니다
+# from tavily import TavilyClient
+# from firecrawl import FirecrawlApp
 from dotenv import load_dotenv
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -29,7 +50,7 @@ from utils.text_processing import (
     extract_product_info_from_content,
     calculate_relevance_score
 )
-from utils.retry_helper import retry_on_failure
+# from utils.retry_helper import retry_on_failure  # 더 이상 사용하지 않음 (도구 파일에서 자체 에러 처리)
 
 load_dotenv()
 
@@ -73,19 +94,53 @@ class ShoppingAgentState(TypedDict):
 
 class EnhancedShoppingAgent:
     """
-    향상된 쇼핑 에이전트 클래스
+    Enhanced Shopping Agent - UI 추적 지원 고급 쇼핑 추천 에이전트
     
-    LangGraph를 사용하여 구축된 4단계 쇼핑 추천 에이전트:
-    1. 질문 분석: 사용자 쿼리를 구조화된 정보로 변환
-    2. 사전 검색: Tavily를 통한 관련 정보 수집
-    3. 사전 스크래핑: Firecrawl을 통한 상세 콘텐츠 수집
-    4. 최종 답변: 수집된 정보를 바탕으로 전문적 추천 제공
+    이 클래스는 LangGraph StateGraph를 기반으로 구축된 4단계 쇼핑 추천 파이프라인을 제공합니다.
+    각 단계에서 LangChain 도구를 활용하여 UI에서 실시간 진행상황을 추적할 수 있습니다.
     
-    Features:
-        - Structured output을 통한 안정적인 질문 분석
-        - 관련성 점수 기반 URL 선택
-        - 설정 기반 API 호출 최적화
-        - 단계별 진행 상황 로깅
+    워크플로우 단계:
+    1. 📝 질문 분석 (analyze_query): 
+       - Structured Output을 통한 안정적인 쿼리 파싱
+       - 검색 키워드, 상품 카테고리, 가격대 등 추출
+       - 쇼핑 의도 분석 (구매, 비교, 정보수집 등)
+       
+    2. 🔍 사전 검색 (pre_search):
+       - Tavily API를 통한 관련 정보 수집
+       - 설정 기반 검색 개수 제한 (API 비용 최적화)
+       - 관련성 점수 계산 및 결과 정렬
+       
+    3. 🕷️ 사전 스크래핑 (pre_scrape):
+       - Firecrawl API를 통한 상세 콘텐츠 수집
+       - 스마트한 URL 선별 (관련성 점수 + 쇼핑몰 도메인 우선순위)
+       - 콘텐츠 길이 제한 및 상품 정보 자동 추출
+       
+    4. 🎯 최종 답변 (react_agent):
+       - 수집된 모든 정보를 종합한 컨텍스트 구성
+       - 전문 쇼핑 컨설턴트 페르소나로 상세 추천 생성
+       - 가격대별 옵션, 구매 가이드, 대안 상품 제시
+    
+    UI 추적 기능:
+        - 각 도구 호출 시 on_tool_start/end 이벤트 자동 발생
+        - app.py의 astream_events와 완벽 호환
+        - Human → ToolMessage → AI 순서의 일관된 메시지 플로우
+        - React Agent와 동일한 도구 이력 표시 경험
+    
+    설정 기반 최적화:
+        - AgentConfig를 통한 세밀한 동작 제어
+        - 검색/스크래핑 개수 제한으로 비용 최적화
+        - 콘텐츠 길이 제한으로 성능 최적화
+        - 에러 발생 시 우아한 실패 처리
+    
+    Example:
+        >>> config = get_config("credit_saving")
+        >>> agent = EnhancedShoppingAgent(config)
+        >>> workflow = agent.create_workflow()
+        >>> result = await workflow.ainvoke({
+        ...     "user_query": "겨울용 패딩 추천해줘",
+        ...     "messages": [],
+        ...     "processing_status": "시작"
+        ... })
     """
     
     def __init__(self, config: AgentConfig = None):
@@ -110,9 +165,39 @@ class EnhancedShoppingAgent:
             api_key=os.getenv("OPENAI_API_KEY")
         )
         
-        # 외부 서비스 클라이언트 초기화
-        self.tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-        self.firecrawl_client = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY"))
+        # LangChain 도구 import 및 설정
+        # 참고: 이제 Tavily, Firecrawl 클라이언트는 개별 도구 파일에서 관리됩니다
+        self.tools = self._setup_tools()
+        
+    def _setup_tools(self):
+        """
+        외부 도구 파일에서 LangChain 도구들을 import하고 설정합니다.
+        
+        이 메서드는 Enhanced Shopping Agent에서 사용할 도구들을 동적으로 로드하고
+        딕셔너리 형태로 구성하여 노드에서 쉽게 접근할 수 있도록 합니다.
+        
+        각 도구는 @tool 데코레이터로 래핑되어 LangGraph의 astream_events에서
+        on_tool_start/end 이벤트를 자동으로 발생시켜 UI 추적이 가능합니다.
+        
+        Returns:
+            Dict[str, Tool]: 도구 이름을 키로 하는 도구 딕셔너리
+                - "tavily_search_tool": 웹 검색 도구
+                - "firecrawl_scrape_tool": 웹 스크래핑 도구
+                
+        Note:
+            - 새로운 도구 추가 시 이 메서드만 수정하면 됩니다
+            - 도구들은 독립적인 파일로 관리되어 재사용성이 높습니다
+            - 모든 도구는 일관된 응답 형식을 제공합니다 (success, error 포함)
+        """
+        # 외부 도구 모듈에서 도구 함수들 import
+        from src.tools.tavily import tavily_search_tool      # Tavily 웹 검색 도구
+        from src.tools.firecrawl import firecrawl_scrape_tool # Firecrawl 스크래핑 도구
+        
+        # 도구 리스트 구성
+        tools = [tavily_search_tool, firecrawl_scrape_tool]
+        
+        # 도구 이름을 키로 하는 딕셔너리 반환 (노드에서 self.tools["도구명"]으로 접근)
+        return {tool.name: tool for tool in tools}
         
         
     def create_workflow(self) -> CompiledStateGraph:
@@ -316,12 +401,15 @@ class EnhancedShoppingAgent:
                 if remaining_slots <= 0:
                     break
                 
-                response = self.tavily_client.search(
-                    query=search_query,
-                    search_depth=self.config.search.search_depth,
-                    max_results=remaining_slots
-                )
-                
+                # LangChain 도구를 통한 Tavily 검색 수행
+                # 이 방식으로 호출하면 자동으로 on_tool_start/end 이벤트가 발생하여
+                # UI에서 도구 실행 상태를 실시간으로 추적할 수 있습니다
+                tavily_tool = self.tools["tavily_search_tool"]
+                response = tavily_tool.invoke({
+                    "query": search_query,
+                    "search_depth": self.config.search.search_depth,
+                    "max_results": remaining_slots
+                })
                 
                 for result in response.get("results", []):
                     if total_results_count >= total_max_results:
@@ -444,33 +532,37 @@ class EnhancedShoppingAgent:
                     try:
                         print(f"📄 스크래핑 시작: {url}")
                         
-                        # Firecrawl로 스크래핑 (재시도 메커니즘 포함)
-                        scrape_result = await self._scrape_url_with_retry(url)
+                        # LangChain 도구를 통한 Firecrawl 스크래핑 수행
+                        # 도구 호출 시 자동으로 on_tool_start/end 이벤트가 발생하여
+                        # UI에서 각 URL별 스크래핑 진행상황을 실시간으로 확인할 수 있습니다
+                        firecrawl_tool = self.tools["firecrawl_scrape_tool"]
+                        scrape_result = firecrawl_tool.invoke({
+                            "url": url,
+                            "content_max_length": self.config.scraping.content_max_length
+                        })
                         
-                        if scrape_result and scrape_result.success:
-                            # content = scrape_result.get("data", {}).get("markdown", "")
-                            content = scrape_result.markdown
-                            
-                            # 콘텐츠 길이 제한
-                            content_limit = self.config.scraping.content_max_length
-                            limited_content = content[:content_limit] if len(content) > content_limit else content
+                        if scrape_result.get("success"):
+                            # 성공적인 스크래핑
+                            content = scrape_result["content"]
+                            title = scrape_result["title"]
                             
                             scraped_content[url] = {
-                                "title": self._extract_title(limited_content),
-                                "content": limited_content,
+                                "title": title,
+                                "content": content,
                                 "timestamp": datetime.now().isoformat(),
-                                "content_length": len(content),
-                                "content_truncated": len(content) > content_limit,
+                                "content_length": scrape_result["content_length"],
+                                "content_truncated": scrape_result.get("content_truncated", False),
                                 "original_data": content
                             }
                             
                             # 상품 데이터 추출
-                            extracted_product = self._extract_product_info(limited_content, url)
+                            extracted_product = self._extract_product_info(content, url)
                             if extracted_product:
                                 product_data.append(extracted_product)
+                            
                         else:
                             # 스크래핑 실패
-                            error_msg = scrape_result.error if scrape_result else "응답 없음"
+                            error_msg = scrape_result.get("error", "알 수 없는 오류")
                             scraped_content[url] = {
                                 "title": "스크래핑 실패",
                                 "content": f"오류: {error_msg}",
@@ -536,29 +628,6 @@ class EnhancedShoppingAgent:
         
         return best_urls
     
-    @retry_on_failure(max_retries=2, delay=1.0)
-    async def _scrape_url_with_retry(self, url: str):
-        """
-        재시도 메커니즘이 포함된 URL 스크래핑
-        
-        Args:
-            url (str): 스크래핑할 URL
-            
-        Returns:
-            Firecrawl 응답 객체
-            
-        Note:
-            502 에러 등 일시적 장애에 대응하여 최대 2회 재시도
-        """
-        import asyncio
-        
-        # Firecrawl은 동기 API이므로 비동기 래퍼 사용
-        loop = asyncio.get_event_loop()
-        
-        def sync_scrape():
-            return self.firecrawl_client.scrape_url(url, formats=["markdown"])
-        
-        return await loop.run_in_executor(None, sync_scrape)
     
     def _extract_title(self, content: str) -> str:
         """

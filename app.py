@@ -17,9 +17,10 @@ import streamlit as st
 import asyncio
 import json
 import traceback
+import uuid
 
 from dotenv import load_dotenv
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, AIMessage
 from typing import Dict, Any, List, Optional, Set, Tuple
 from src.agent.enhanced_shopping_agent import build_enhanced_agent as build_agent
 # from src.agent.shopping_react_agent import build_agent

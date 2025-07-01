@@ -6,10 +6,10 @@ Python, LangChain, LangGraph, MCP를 활용한 고품질 쇼핑 에이전트 구
 ## 아키텍처 설계
 
 ### 1. Enhanced Shopping Agent ✨
-- **목적**: 사전 검색+스크래핑 파이프라인
+- **목적**: 사전 검색+스크래핑 파이프라인 + UI 추적 지원
 - **구현**: `src/agent/enhanced_shopping_agent.py`
-- **도구**: Firecrawl 직접 클라이언트, Tavily API
-- **특징**: 설정 기반 관리
+- **도구**: LangChain 도구 기반 (Tavily, Firecrawl)
+- **특징**: 설정 기반 관리, 실시간 UI 도구 추적, 모듈화된 도구 관리
 
 ### 2. 기존 단일 에이전트 (React Agent)
 - **목적**: 단순 도구 활용 및 기본 질의응답
@@ -56,8 +56,9 @@ src/
 │   └── shopping_react_agent.py     # 기존 단일 React 에이전트
 ├── config/
 │   └── agent_config.py            # ✨ 설정 관리
-├── tools/                         # 레거시 도구들 (참고용)
-│   ├── tavily.py                  # Tavily 검색 도구
+├── tools/                         # ✨ LangChain 도구 (Enhanced Agent용)
+│   ├── tavily.py                  # Tavily 웹 검색 도구 (@tool 데코레이터)
+│   ├── firecrawl.py               # Firecrawl 스크래핑 도구 (@tool 데코레이터)
 │   ├── retriever.py               # 벡터 검색 도구  
 │   └── datetime.py                # 시간 도구
 ├── utils/                         # ✨ 새로 추가된 유틸리티
