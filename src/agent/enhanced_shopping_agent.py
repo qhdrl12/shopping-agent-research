@@ -730,7 +730,7 @@ def get_current_time() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-async def build_enhanced_agent(config_name: str = "default") -> CompiledStateGraph:
+async def build_enhanced_agent(config_name: str = "credit_saving") -> CompiledStateGraph:
     """Enhanced Shopping Agent 빌드"""
     config = get_config(config_name)
     agent = EnhancedShoppingAgent(config)

@@ -21,7 +21,9 @@ import traceback
 from dotenv import load_dotenv
 from langchain_core.messages import ToolMessage
 from typing import Dict, Any, List, Optional, Set, Tuple
-from agent.enhanced_shopping_agent import build_enhanced_agent
+# from agent.enhanced_shopping_agent import build_enhanced_agent as build_agent
+from agent.shopping_react_agent import build_agent
+
 
 load_dotenv()
 
@@ -362,7 +364,8 @@ async def initialize_agent():
         with st.spinner("🔧 AI 쇼핑 어시스턴트를 준비하는 중입니다..."):
             try:
                 # 에이전트 빌드 시도 (크레딧 절약 모드)
-                agent = await build_enhanced_agent("credit_saving")
+                agent = await build_agent()
+                # agent = await build_build_agent_agent("credit_saving")
                 
                 # 에이전트가 제대로 생성되었는지 확인
                 if agent is not None:

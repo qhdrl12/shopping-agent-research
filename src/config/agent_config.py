@@ -74,8 +74,8 @@ class AgentConfig:
     max_processing_time: int = 120  # 초
     
     # 서브 설정
-    search: SearchConfig = None
-    scraping: ScrapingConfig = None
+    search: SearchConfig | None = None
+    scraping: ScrapingConfig | None = None
     
     # 디버그 설정
     debug_mode: bool = False

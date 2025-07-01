@@ -2,6 +2,7 @@
 name = "scrap-agent"
 version = "0.1.0"
 description = "A web scraping and question-answering agent."
+requires-python = ">=3.11"
 dependencies = [
     "langchain",
     "langgraph",
@@ -21,3 +22,5 @@ dependencies = [
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+

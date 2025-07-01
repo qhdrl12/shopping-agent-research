@@ -198,7 +198,7 @@ async def get_tools():
             # 파일 시스템 접근을 위한 MCP 서버 설정
             "filesystem": {
                 "command": "npx",
-                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/bongkilee/Demo"],
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/jenson.lee/Demo"],
                 "transport": "stdio",
             }
         }
