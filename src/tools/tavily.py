@@ -11,9 +11,19 @@ LangChain의 @tool 데코레이터를 사용하여 도구를 정의하고, 구�
 """
 
 import os
+import ssl
+import urllib3
 from typing import Dict, Any
 from langchain_core.tools import tool
 from tavily import TavilyClient
+
+# SSL 경고 비활성화 (외부 환경에서 SSL 인증서 문제 해결)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# SSL 컨텍스트 설정
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
 
 
 @tool

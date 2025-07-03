@@ -36,21 +36,17 @@ from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
-# from langgraph.prebuilt import create_react_agent  # 더 이상 사용하지 않음
-
-# 외부 API 클라이언트들은 이제 개별 도구 파일에서 관리됩니다
-# from tavily import TavilyClient
-# from firecrawl import FirecrawlApp
 from dotenv import load_dotenv
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 from config.agent_config import AgentConfig, get_config
+from utils.local_prompt_manager import LocalPromptManager
 from utils.text_processing import (
     extract_title_from_content,
     extract_product_info_from_content,
     calculate_relevance_score
 )
-# from utils.retry_helper import retry_on_failure  # 더 이상 사용하지 않음 (도구 파일에서 자체 에러 처리)
 
 load_dotenv()
 
@@ -143,13 +139,14 @@ class EnhancedShoppingAgent:
         ... })
     """
     
-    def __init__(self, config: AgentConfig = None):
+    def __init__(self, config: AgentConfig = None, prompt_name: str = "default"):
         """
         에이전트 초기화
         
         Args:
             config (AgentConfig, optional): 에이전트 설정 객체. 
                                           None인 경우 기본 설정 사용.
+            prompt_name (str, optional): Supabase에서 가져올 프롬프트 이름. 기본값은 "default".
         
         Note:
             - OpenAI, Tavily, Firecrawl API 키가 환경변수에 설정되어 있어야 함
@@ -158,6 +155,10 @@ class EnhancedShoppingAgent:
         # 설정 초기화 - 기본값 또는 전달받은 설정 사용
         self.config = config or get_config("default")
         
+        # 로컬 파일에서 프롬프트 로드
+        self.prompt_manager = LocalPromptManager()
+        self._load_prompts(prompt_name)
+
         # LLM 클라이언트 초기화 (OpenAI GPT 모델)
         self.llm = ChatOpenAI(
             model=self.config.llm_model,
@@ -166,8 +167,18 @@ class EnhancedShoppingAgent:
         )
         
         # LangChain 도구 import 및 설정
-        # 참고: 이제 Tavily, Firecrawl 클라이언트는 개별 도구 파일에서 관리됩니다
         self.tools = self._setup_tools()
+
+    def _load_prompts(self, prompt_name: str):
+        """로컬 파일에서 지정된 이름의 프롬프트를 로드합니다."""
+        print(f'\n🔄 로컬 파일에서 "{prompt_name}" 프롬프트를 로드합니다...')
+        prompt_data = self.prompt_manager.get_prompt(prompt_name)
+        if not prompt_data:
+            raise ValueError(f'로컬 파일에서 "{prompt_name}" 프롬프트를 찾을 수 없습니다.')
+
+        self.analysis_prompt_template = prompt_data.get('query_analysis_prompt', '')
+        self.response_prompt_template = prompt_data.get('model_response_prompt', '')
+        print("✅ 프롬프트 로드 완료.")
         
     def _setup_tools(self):
         """
@@ -254,65 +265,9 @@ class EnhancedShoppingAgent:
         user_query = state["user_query"]
         print(f"🎯 분석할 질문: {user_query}")
         
-        analysis_prompt = f"""
-        당신은 전문 쇼핑 컨설턴트입니다. 사용자의 쇼핑 질문을 심층 분석하여 최적의 상품 검색 전략을 수립해야 합니다.
-
-        🎯 **중요**: search_keywords는 이후 웹 검색과 상품 추천의 핵심이 됩니다. 매우 신중하게 선택하세요.
-
-        **사용자 질문**: "{user_query}"
-
-        **분석 지침**:
-
-        1. **main_product (주요 상품)**: 
-           - 사용자가 찾는 정확한 상품명이나 카테고리
-           - 예: "패딩 점퍼", "무선 이어폰", "운동화"
-
-        2. **search_keywords (검색 키워드 - 매우 중요!)**: 
-           ⚠️ **이 키워드들이 검색 품질을 결정합니다!**
-           
-           **포함해야 할 키워드 유형:**
-           - 핵심 상품명 (예: "패딩", "점퍼", "코트")
-           - 구체적 특징 (예: "방수", "경량", "초경량", "구스다운")
-           - 브랜드명 (언급된 경우)
-           - 용도/시즌 (예: "겨울용", "등산용", "데일리")
-           - 성별/연령 (예: "남성", "여성", "아동용")
-           - 가격대 키워드 (예: "저렴한", "프리미엄", "가성비")
-           
-           **키워드 선택 원칙:**
-           - 검색 결과의 정확성을 높이는 키워드 우선
-           - 너무 일반적이지 않고, 너무 구체적이지도 않은 균형
-           - 온라인 쇼핑몰에서 실제 사용되는 검색어
-           - 최대 5개까지, 중요도 순으로 배열
-           
-           **좋은 예시:**
-           - "겨울 패딩 추천" → ["겨울패딩", "롱패딩", "다운재킷", "방한복", "아우터"]
-           - "무선 이어폰" → ["무선이어폰", "블루투스이어폰", "에어팟", "TWS이어폰", "넥밴드"]
-
-        3. **price_range (가격대)**:
-           - 구체적 금액이 언급된 경우: "10만원 이하", "50-100만원"
-           - 추상적 표현의 경우: "저렴한", "가성비", "프리미엄"
-           - 언급 없으면: "가격 정보 없음"
-
-        4. **target_categories (대상 카테고리)**:
-           - 패션, 전자제품, 생활용품, 스포츠/레저, 뷰티, 가전, 자동차, 도서 등
-           - 주 카테고리와 서브 카테고리 포함
-
-        5. **search_intent (검색 의도)**:
-           - "구매": 바로 구매하려는 의도
-           - "비교": 여러 상품을 비교하려는 의도  
-           - "정보수집": 상품에 대한 정보를 얻으려는 의도
-           - "추천": 추천을 받으려는 의도
-
-        **분석 시 고려사항**:
-        - 사용자의 암묵적 요구사항 파악 (예: "회사원" → "비즈니스 캐주얼")
-        - 계절성 고려 (예: 겨울 → 방한 제품)
-        - 트렌드 반영 (예: "MZ세대 인기" → "트렌디한")
-        - 실용성 vs 심미성 균형
-
-        위 지침을 바탕으로 사용자 질문을 정확하고 상세하게 분석해주세요.
-        """
-        
         try:
+            # 템플릿에서 {user_query} 플레이스홀더를 안전하게 치환
+            analysis_prompt = self.analysis_prompt_template.replace("{user_query}", user_query)
             # Function calling 방식으로 structured output 사용
             structured_llm = self.llm.with_structured_output(QueryAnalysis, method="function_calling")
             analysis_result = await structured_llm.ainvoke([HumanMessage(content=analysis_prompt)])
@@ -332,8 +287,10 @@ class EnhancedShoppingAgent:
             print(f"   - 검색 의도: {analyzed_data.get('search_intent')}")
             
         except Exception as e:
+            import traceback
             print(f"❌ 질문 분석 실패: {str(e)}")
-            state["error_info"] = f"질문 분석 실패: {str(e)}"
+            print(f"🐛 상세 트레이스백:\n{traceback.format_exc()}") # 전체 트레이스백 출력
+            state["error_info"] = f"질문 분석 실패: {str(e)}\n{traceback.format_exc()}"
             state["processing_status"] = "질문 분석 실패"
             # 기본값 설정
             state["search_keywords"] = [user_query]
@@ -711,61 +668,13 @@ class EnhancedShoppingAgent:
         state["enriched_context"] = enriched_context
         
         # React Agent 프롬프트 구성
-        system_prompt = """**당신은 전문 쇼핑 컨설턴트입니다.**
-
-        **역할**: 사용자에게 최고의 쇼핑 경험을 제공하는 것이 목표입니다. 단순한 상품 나열이 아닌, 개인화된 맞춤 추천을 통해 사용자가 만족할 수 있는 완벽한 답변을 제공하세요.
-
-        **🎯 답변 구성 원칙**:
-
-        **1. 개인화된 인사 및 요구사항 확인**
-        - 사용자의 질문을 정확히 이해했음을 보여주세요
-        - 분석된 요구사항을 재확인하며 공감대 형성
-
-        **2. 핵심 추천 상품**
-        각 상품마다 다음 정보를 체계적으로 제공:
-        - **상품명**: 명확하고 구체적인 제품명
-        - **핵심 특징**: 왜 이 상품을 추천하는지 명확한 이유
-        - **가격 정보**: 구체적인 상품 가격
-        - **장점**: 사용자 요구사항과 연결된 장점
-        - **주의사항**: 솔직한 단점이나 고려사항 (신뢰성 향상)
-        - **구매처**: 구체적인 온라인몰이나 구매 방법
-
-        **3. 가격대별 세분화 추천**
-        - **경제적 선택**: 가성비 중심 옵션
-        - **균형 선택**: 가격과 품질의 균형
-        - **프리미엄 선택**: 최고 품질/성능 중심
-
-        **4. 실용적 구매 가이드**
-        - **구매 시 체크포인트**: 사이즈, 색상, 배송, A/S 등
-        - **계절성/시기 고려사항**: 언제 사는 것이 유리한지
-        - **대안 상품**: 재고 부족이나 예산 초과 시 대체재
-
-        **5. 전문가 팁 & 개인화 조언**
-        - 해당 카테고리의 전문적 인사이트
-        - 사용자 상황에 맞는 맞춤 조언
-        - 향후 구매를 위한 트렌드 정보
-
-        **🎨 답변 스타일 가이드**:
-        - **친근하고 전문적**: 딱딱하지 않으면서도 신뢰할 수 있는 톤
-        - **구체적이고 실용적**: 모호한 표현보다는 명확한 정보
-        - **균형잡힌 시각**: 장점만이 아닌 솔직한 단점도 포함
-        - **행동 유도**: 사용자가 다음에 무엇을 해야 할지 명확히 제시
-
-        **⚠️ 주의사항**:
-        - 수집된 정보가 부족한 경우, 솔직하게 한계를 인정하세요
-        - 과장된 표현보다는 객관적 정보를 우선하세요
-        - 가격은 변동 가능함을 명시하세요
-        - 개인 취향과 상황에 따라 다를 수 있음을 안내하세요
-
-        **📊 수집된 컨텍스트 정보**:
-        {context}
-
-        위 정보를 바탕으로 사용자에게 최고의 쇼핑 경험을 선사하는 완벽한 답변을 작성해주세요.
-        """
+        system_prompt = self.response_prompt_template
         
         try:
+            # 템플릿에서 {context} 플레이스홀더를 안전하게 치환
+            formatted_system_prompt = system_prompt.replace("{context}", enriched_context)
             messages = [
-                SystemMessage(content=system_prompt.format(context=enriched_context)),
+                SystemMessage(content=formatted_system_prompt),
                 HumanMessage(content=state["user_query"])
             ]
             
@@ -799,10 +708,10 @@ def get_current_time() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-async def build_enhanced_agent(config_name: str = "credit_saving") -> CompiledStateGraph:
+async def build_enhanced_agent(config_name: str = "credit_saving", prompt_name: str = "default") -> CompiledStateGraph:
     """Enhanced Shopping Agent 빌드"""
     config = get_config(config_name)
-    agent = EnhancedShoppingAgent(config)
+    agent = EnhancedShoppingAgent(config, prompt_name)
     return agent.create_workflow()
 
 

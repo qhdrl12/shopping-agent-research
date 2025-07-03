@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import ToolMessage, AIMessage
 from typing import Dict, Any, List, Optional, Set, Tuple
 from src.agent.enhanced_shopping_agent import build_enhanced_agent as build_agent
+from src.utils.local_prompt_manager import LocalPromptManager
 # from src.agent.shopping_react_agent import build_agent
 
 load_dotenv()
@@ -45,6 +46,20 @@ if 'messages' not in st.session_state:
     st.session_state.messages = []  # 채팅 메시지 히스토리
 if 'history' not in st.session_state:
     st.session_state.history = []  # LangChain 대화 히스토리
+
+# 프롬프트 관리 세션 상태 초기화
+if 'prompt_manager' not in st.session_state:
+    st.session_state.prompt_manager = LocalPromptManager()
+if 'active_prompt_name' not in st.session_state:
+    st.session_state.active_prompt_name = 'default'
+if 'prompt_edit_mode' not in st.session_state:
+    st.session_state.prompt_edit_mode = False
+if 'show_prompt_manager' not in st.session_state:
+    st.session_state.show_prompt_manager = False
+if 'current_editing_prompt' not in st.session_state:
+    st.session_state.current_editing_prompt = None
+if 'show_new_prompt_form' not in st.session_state:
+    st.session_state.show_new_prompt_form = False
 
 
 # =============================================================================
@@ -363,9 +378,23 @@ async def initialize_agent():
     if st.session_state.agent is None:
         with st.spinner("🔧 AI 쇼핑 어시스턴트를 준비하는 중입니다..."):
             try:
-                # 에이전트 빌드 시도 (크레딧 절약 모드)
-                agent = await build_agent()
-                # agent = await build_build_agent_agent("credit_saving")
+                # 임시 프롬프트가 있는지 확인
+                if hasattr(st.session_state, 'temp_prompts'):
+                    # 임시 프롬프트를 사용해서 에이전트 빌드
+                    from src.agent.enhanced_shopping_agent import EnhancedShoppingAgent
+                    from src.config.agent_config import get_config
+                    
+                    config = get_config("credit_saving")
+                    temp_agent = EnhancedShoppingAgent(config, st.session_state.active_prompt_name)
+                    
+                    # 임시 프롬프트로 오버라이드
+                    temp_agent.analysis_prompt_template = st.session_state.temp_prompts['analysis']
+                    temp_agent.response_prompt_template = st.session_state.temp_prompts['response']
+                    
+                    agent = temp_agent.create_workflow()
+                else:
+                    # 일반적인 에이전트 빌드 (활성 프롬프트 사용)
+                    agent = await build_agent(prompt_name=st.session_state.active_prompt_name)
                 
                 # 에이전트가 제대로 생성되었는지 확인
                 if agent is not None:
@@ -842,6 +871,350 @@ def generate_history_summary(message_parts: List[Dict[str, Any]]) -> str:
 # 메인 애플리케이션
 # =============================================================================
 
+# =============================================================================
+# 프롬프트 관리 UI 컴포넌트
+# =============================================================================
+
+def extract_prompt_summary(prompt_text: str) -> str:
+    """프롬프트에서 의미있는 요약 정보 추출"""
+    if not prompt_text:
+        return "내용이 없습니다"
+    
+    # 주요 키워드들을 찾아서 프롬프트의 목적 파악
+    keywords_analysis = {
+        "질문 분석": ["질문을 분석", "정보를 추출", "JSON 형식", "검색 키워드"],
+        "상품 추천": ["쇼핑 컨설턴트", "상품 추천", "구매 가이드", "전문적"],
+        "구조화 출력": ["JSON", "구조화", "템플릿", "형식"],
+        "개인화": ["개인화", "맞춤", "사용자", "상황"],
+        "전문성": ["전문", "컨설턴트", "분석", "조언"]
+    }
+    
+    found_features = []
+    text_lower = prompt_text.lower()
+    
+    for feature, keywords in keywords_analysis.items():
+        if any(keyword.lower() in text_lower for keyword in keywords):
+            found_features.append(feature)
+    
+    if found_features:
+        return " • ".join(found_features[:3])  # 최대 3개 특징
+    else:
+        # fallback: 첫 문장에서 의미있는 부분 추출
+        sentences = prompt_text.split('.')
+        if sentences:
+            first_sentence = sentences[0].strip()
+            if len(first_sentence) > 10:
+                return first_sentence[:80] + "..."
+        return "사용자 정의 프롬프트"
+
+def render_prompt_selector():
+    """직관적인 프롬프트 편집 UI"""
+    
+    # CSS 스타일 추가
+    st.markdown("""
+    <style>
+        .prompt-info {
+            background: #e3f2fd;
+            color: #1565c0;
+            padding: 0.25rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            margin: 0.25rem;
+            display: inline-block;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # 개별 프롬프트 편집 섹션들
+    render_individual_prompt_sections()
+
+def render_individual_prompt_sections():
+    """각 프롬프트를 개별 접이식 섹션으로 표시"""
+    current_prompt = st.session_state.prompt_manager.get_prompt(st.session_state.active_prompt_name)
+    
+    if not current_prompt:
+        st.error("활성 프롬프트를 찾을 수 없습니다.")
+        return
+    
+    available_prompts = st.session_state.prompt_manager.get_prompt_list()
+    
+    # 질문 분석 프롬프트 섹션
+    with st.expander(f"🔍 질문 분석 프롬프트 - {st.session_state.active_prompt_name}", expanded=False):
+        analysis_summary = extract_prompt_summary(current_prompt.get('query_analysis_prompt', ''))
+        st.markdown(f'<div class="prompt-info">특징: {analysis_summary}</div>', unsafe_allow_html=True)
+        st.caption(f"📝 {len(current_prompt.get('query_analysis_prompt', '')):,}자")
+        
+        # 프롬프트 선택 (질문 분석용) - 여러 개 있을 때만 표시
+        available_analysis_prompts = st.session_state.prompt_manager.get_prompt_list_by_type("query_analysis")
+        source_prompt_analysis = None
+        
+        if len(available_analysis_prompts) > 1:
+            # 현재 활성 프롬프트 제외
+            other_prompts = [p for p in available_analysis_prompts if not p.startswith(f"{st.session_state.active_prompt_name}_")]
+            if other_prompts:
+                # 현재 활성 프롬프트를 기본값으로 설정
+                current_analysis_name = f"{st.session_state.active_prompt_name}_query_analysis"
+                default_option = current_analysis_name if current_analysis_name in available_analysis_prompts else other_prompts[0]
+                
+                source_prompt_analysis = st.selectbox(
+                    "다른 프롬프트에서 불러오기",
+                    options=[default_option] + [p for p in other_prompts if p != default_option],
+                    key="source_analysis"
+                )
+        
+        # 편집 가능한 텍스트 영역
+        initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
+        if source_prompt_analysis:
+            source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_analysis, "query_analysis")
+            if source_data:
+                initial_analysis_content = source_data.get('content', '')
+        
+        new_analysis_prompt = st.text_area(
+            "질문 분석 프롬프트 편집",
+            value=initial_analysis_content,
+            height=300,
+            key="edit_analysis_prompt",
+            help="사용자 질문을 분석하여 구조화된 정보를 추출하는 프롬프트"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("💾 저장", key="save_analysis", use_container_width=True):
+                st.session_state.show_save_analysis_form = True
+                st.session_state.temp_analysis_content_for_save = new_analysis_prompt
+                st.rerun()
+        
+        # 저장 폼 표시
+        if st.session_state.get('show_save_analysis_form', False):
+            with st.form("save_analysis_form", clear_on_submit=True):
+                st.markdown("**💾 질문 분석 프롬프트 저장**")
+                save_name = st.text_input(
+                    "저장할 프롬프트 이름",
+                    value="",
+                    placeholder="예: advanced_analysis, custom_prompt_v1",
+                    help="새로운 이름으로 저장하거나 기존 이름으로 덮어쓰기 (default는 보호됨)"
+                )
+                
+                col_save1, col_save2, col_save3 = st.columns(3)
+                with col_save1:
+                    if st.form_submit_button("✅ 저장 확인", type="primary", use_container_width=True):
+                        if save_name:
+                            success = save_prompt_as_new(
+                                save_name, 
+                                st.session_state.temp_analysis_content_for_save,
+                                current_prompt.get('model_response_prompt', ''),
+                                'analysis'
+                            )
+                            if success:
+                                st.session_state.show_save_analysis_form = False
+                                if hasattr(st.session_state, 'temp_analysis_content_for_save'):
+                                    del st.session_state.temp_analysis_content_for_save
+                                st.rerun()
+                        else:
+                            st.warning("프롬프트 이름을 입력해주세요.")
+                
+                with col_save2:
+                    if st.form_submit_button("❌ 취소", use_container_width=True):
+                        st.session_state.show_save_analysis_form = False
+                        if hasattr(st.session_state, 'temp_analysis_content_for_save'):
+                            del st.session_state.temp_analysis_content_for_save
+                        st.rerun()
+        
+        with col2:
+            if st.button("⚡ 적용", key="temp_apply_analysis", use_container_width=True):
+                # 임시로 메모리에만 저장하고 에이전트 재구성
+                st.session_state.temp_prompts = {
+                    'analysis': new_analysis_prompt,
+                    'response': current_prompt.get('model_response_prompt', '')
+                }
+                st.session_state.agent = None
+                st.success("⚡ 적용됨!")
+                st.rerun()
+    
+    # 최종 답변 프롬프트 섹션
+    with st.expander(f"💬 최종 답변 프롬프트 - {st.session_state.active_prompt_name}", expanded=False):
+        response_summary = extract_prompt_summary(current_prompt.get('model_response_prompt', ''))
+        st.markdown(f'<div class="prompt-info">특징: {response_summary}</div>', unsafe_allow_html=True)
+        st.caption(f"📝 {len(current_prompt.get('model_response_prompt', '')):,}자")
+        
+        # 프롬프트 선택 (최종 답변용) - 여러 개 있을 때만 표시
+        available_response_prompts = st.session_state.prompt_manager.get_prompt_list_by_type("model_response")
+        source_prompt_response = None
+        
+        if len(available_response_prompts) > 1:
+            # 현재 활성 프롬프트 제외
+            other_prompts = [p for p in available_response_prompts if not p.startswith(f"{st.session_state.active_prompt_name}_")]
+            if other_prompts:
+                # 현재 활성 프롬프트를 기본값으로 설정
+                current_response_name = f"{st.session_state.active_prompt_name}_model_response"
+                default_option = current_response_name if current_response_name in available_response_prompts else other_prompts[0]
+                
+                source_prompt_response = st.selectbox(
+                    "다른 프롬프트에서 불러오기",
+                    options=[default_option] + [p for p in other_prompts if p != default_option],
+                    key="source_response"
+                )
+        
+        # 편집 가능한 텍스트 영역
+        initial_response_content = current_prompt.get('model_response_prompt', '')
+        if source_prompt_response:
+            source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_response, "model_response")
+            if source_data:
+                initial_response_content = source_data.get('content', '')
+        if hasattr(st.session_state, 'temp_response_content'):
+            initial_response_content = st.session_state.temp_response_content
+            del st.session_state.temp_response_content
+        
+        new_response_prompt = st.text_area(
+            "최종 답변 프롬프트 편집",
+            value=initial_response_content,
+            height=300,
+            key="edit_response_prompt",
+            help="수집된 정보를 바탕으로 최종 답변을 생성하는 프롬프트"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("💾 저장", key="save_response", use_container_width=True):
+                st.session_state.show_save_response_form = True
+                st.session_state.temp_response_content_for_save = new_response_prompt
+                st.rerun()
+        
+        # 저장 폼 표시
+        if st.session_state.get('show_save_response_form', False):
+            with st.form("save_response_form", clear_on_submit=True):
+                st.markdown("**💾 최종 답변 프롬프트 저장**")
+                save_name = st.text_input(
+                    "저장할 프롬프트 이름",
+                    value="",
+                    placeholder="예: advanced_response, custom_prompt_v1",
+                    help="새로운 이름으로 저장하거나 기존 이름으로 덮어쓰기 (default는 보호됨)"
+                )
+                
+                col_save1, col_save2 = st.columns(2)
+                with col_save1:
+                    if st.form_submit_button("✅ 저장 확인", type="primary", use_container_width=True):
+                        if save_name:
+                            success = save_prompt_as_new(
+                                save_name,
+                                current_prompt.get('query_analysis_prompt', ''),
+                                st.session_state.temp_response_content_for_save,
+                                'response'
+                            )
+                            if success:
+                                st.session_state.show_save_response_form = False
+                                if hasattr(st.session_state, 'temp_response_content_for_save'):
+                                    del st.session_state.temp_response_content_for_save
+                                st.rerun()
+                        else:
+                            st.warning("프롬프트 이름을 입력해주세요.")
+                
+                with col_save2:
+                    if st.form_submit_button("❌ 취소", use_container_width=True):
+                        st.session_state.show_save_response_form = False
+                        if hasattr(st.session_state, 'temp_response_content_for_save'):
+                            del st.session_state.temp_response_content_for_save
+                        st.rerun()
+        
+        with col2:
+            if st.button("⚡ 적용", key="temp_apply_response", use_container_width=True):
+                # 임시로 메모리에만 저장하고 에이전트 재구성
+                current_analysis = st.session_state.temp_prompts.get('analysis') if hasattr(st.session_state, 'temp_prompts') else current_prompt.get('query_analysis_prompt', '')
+                st.session_state.temp_prompts = {
+                    'analysis': current_analysis,
+                    'response': new_response_prompt
+                }
+                st.session_state.agent = None
+                st.success("⚡ 적용됨!")
+                st.rerun()
+
+def save_prompt_section(current_prompt, section_key, new_content):
+    """프롬프트 섹션 저장"""
+    try:
+        # 기본 프롬프트 데이터 복사
+        updated_data = current_prompt.copy()
+        updated_data[section_key] = new_content
+        
+        # 프롬프트 업데이트
+        result = st.session_state.prompt_manager.update_prompt(
+            prompt_id=current_prompt['id'],
+            name=current_prompt['name'],
+            query_analysis_prompt=updated_data.get('query_analysis_prompt', ''),
+            model_response_prompt=updated_data.get('model_response_prompt', '')
+        )
+        
+        return result is not None
+    except Exception as e:
+        st.error(f"❌ 저장 실패: {e}")
+        return False
+
+def save_prompt_as_new(new_name, analysis_content, response_content, section_type):
+    """새로운 이름으로 프롬프트 저장 (타입별 독립 저장)"""
+    try:
+        # 기본 프롬프트 보호 로직
+        if new_name == 'default':
+            st.warning("⚠️ 기본 프롬프트는 덮어쓸 수 없습니다. 다른 이름을 사용해주세요.")
+            return False
+        
+        # section_type에 따라 해당 타입만 저장
+        if section_type == 'analysis':
+            # 질문 분석 프롬프트만 저장
+            prompt_type = "query_analysis"
+            content = analysis_content
+            prompt_name = f"{new_name}_query_analysis"
+        elif section_type == 'response':
+            # 최종 답변 프롬프트만 저장
+            prompt_type = "model_response"
+            content = response_content
+            prompt_name = f"{new_name}_model_response"
+        else:
+            st.error("❌ 유효하지 않은 섹션 타입입니다.")
+            return False
+        
+        # 기존 프롬프트가 있는지 확인
+        existing_prompt = st.session_state.prompt_manager.get_prompt_by_type(prompt_name, prompt_type)
+        
+        if existing_prompt:
+            # 기존 프롬프트 업데이트 확인
+            if st.session_state.get(f'confirm_overwrite_{section_type}', False):
+                result = st.session_state.prompt_manager.update_prompt_by_type(
+                    prompt_id=existing_prompt['id'],
+                    name=prompt_name,
+                    content=content,
+                    prompt_type=prompt_type
+                )
+                
+                if result:
+                    st.success(f"✅ '{new_name}' {section_type} 프롬프트가 업데이트되었습니다!")
+                    st.session_state[f'confirm_overwrite_{section_type}'] = False
+                    return True
+            else:
+                st.warning(f"⚠️ '{new_name}' {section_type} 프롬프트가 이미 존재합니다. 덮어쓰시겠습니까?")
+                if st.button("🔄 덮어쓰기 확인", key=f"confirm_overwrite_{new_name}_{section_type}"):
+                    st.session_state[f'confirm_overwrite_{section_type}'] = True
+                    st.rerun()
+                return False
+        else:
+            # 새 프롬프트 생성 (타입별로 독립적으로)
+            result = st.session_state.prompt_manager.create_prompt_by_type(
+                name=prompt_name,
+                content=content,
+                prompt_type=prompt_type
+            )
+            
+            if result:
+                st.success(f"✅ '{new_name}' {section_type} 프롬프트가 새로 저장되었습니다!")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        st.error(f"❌ 저장 실패: {e}")
+        return False
+
+
+
+
 def main():
     """
     Streamlit 애플리케이션의 메인 진입점
@@ -855,32 +1228,19 @@ def main():
     """
     # 애플리케이션 헤더
     st.title("🛍️ AI 쇼핑 어시스턴트")
-    st.markdown("무엇을 찾아드릴까요? 원하는 상품에 대해 자세히 알려주세요.")
+    
+    # 시스템 상태 (간단한 상태 표시)
+    if st.session_state.agent is not None:
+        st.success("🤖 에이전트: **활성화**")
+    else:
+        st.error("🤖 에이전트: **비활성화**")
+    
+    # 프롬프트 선택 및 편집 UI
+    render_prompt_selector()
 
-    # 디버그 정보 표시 (개발 시에만 사용)
-    with st.expander("🔧 시스템 상태", expanded=False):
-        # 에이전트 상태 상세 확인
-        agent_obj = st.session_state.agent
-        if agent_obj is not None:
-            agent_status = f"✅ 준비됨 ({type(agent_obj).__name__})"
-            st.write(f"**에이전트 상태:** {agent_status}")
-            st.write(f"**에이전트 객체 ID:** {id(agent_obj)}")
-        else:
-            agent_status = "❌ 미준비"
-            st.write(f"**에이전트 상태:** {agent_status}")
-            st.write("**에이전트 객체:** None")
-        
-        st.write(f"**대화 기록:** {len(st.session_state.messages)}개 메시지")
-        st.write(f"**히스토리:** {len(st.session_state.history)}개 항목")
-        
-        # 세션 상태 전체 확인 (디버그용)
-        with st.expander("🔍 전체 세션 상태"):
-            st.json({
-                "agent_exists": st.session_state.agent is not None,
-                "agent_type": str(type(st.session_state.agent)) if st.session_state.agent else "None",
-                "messages_count": len(st.session_state.messages),
-                "history_count": len(st.session_state.history)
-            })
+    st.markdown("---")
+    st.markdown("### 💬 대화")
+    st.markdown("무엇을 찾아드릴까요? 원하는 상품에 대해 자세히 알려주세요.")
 
     # 에이전트 초기화 (앱 시작 시 한 번만)
     if st.session_state.agent is None:

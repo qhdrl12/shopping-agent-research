@@ -13,10 +13,15 @@ LangChain의 @tool 데코레이터를 사용하여 도구를 정의하고, 마�
 """
 
 import os
+import ssl
+import urllib3
 from typing import Dict, Any
 from langchain_core.tools import tool
 from firecrawl import FirecrawlApp
 from dotenv import load_dotenv
+
+# SSL 경고 비활성화 (외부 환경에서 SSL 인증서 문제 해결)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
