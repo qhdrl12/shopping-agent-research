@@ -393,8 +393,27 @@ async def initialize_agent():
                     
                     agent = temp_agent.create_workflow()
                 else:
-                    # 일반적인 에이전트 빌드 (활성 프롬프트 사용)
-                    agent = await build_agent(prompt_name=st.session_state.active_prompt_name)
+                    # 선택된 개별 프롬프트들을 사용해서 에이전트 빌드
+                    from src.agent.enhanced_shopping_agent import EnhancedShoppingAgent
+                    from src.config.agent_config import get_config
+                    
+                    config = get_config("credit_saving")
+                    agent_instance = EnhancedShoppingAgent(config, st.session_state.active_prompt_name)
+                    
+                    # 선택된 개별 프롬프트들로 오버라이드
+                    selected_analysis_data = st.session_state.prompt_manager.get_prompt_by_type(
+                        st.session_state.selected_analysis_prompt, "query_analysis"
+                    )
+                    selected_response_data = st.session_state.prompt_manager.get_prompt_by_type(
+                        st.session_state.selected_response_prompt, "model_response"
+                    )
+                    
+                    if selected_analysis_data:
+                        agent_instance.analysis_prompt_template = selected_analysis_data.get('content', '')
+                    if selected_response_data:
+                        agent_instance.response_prompt_template = selected_response_data.get('content', '')
+                    
+                    agent = agent_instance.create_workflow()
                 
                 # 에이전트가 제대로 생성되었는지 확인
                 if agent is not None:
@@ -938,36 +957,57 @@ def render_individual_prompt_sections():
     
     available_prompts = st.session_state.prompt_manager.get_prompt_list()
     
+    # 세션 상태에 개별 프롬프트 선택 정보 초기화
+    if 'selected_analysis_prompt' not in st.session_state:
+        st.session_state.selected_analysis_prompt = "default"
+    if 'selected_response_prompt' not in st.session_state:
+        st.session_state.selected_response_prompt = "default"
+    
     # 질문 분석 프롬프트 섹션
-    with st.expander(f"🔍 질문 분석 프롬프트 - {st.session_state.active_prompt_name}", expanded=False):
+    with st.expander(f"🔍 질문 분석 프롬프트 - {st.session_state.selected_analysis_prompt}", expanded=False):
         analysis_summary = extract_prompt_summary(current_prompt.get('query_analysis_prompt', ''))
         st.markdown(f'<div class="prompt-info">특징: {analysis_summary}</div>', unsafe_allow_html=True)
         st.caption(f"📝 {len(current_prompt.get('query_analysis_prompt', '')):,}자")
         
-        # 프롬프트 선택 (질문 분석용) - 여러 개 있을 때만 표시
+        # 프롬프트 선택 (질문 분석용)
         available_analysis_prompts = st.session_state.prompt_manager.get_prompt_list_by_type("query_analysis")
-        source_prompt_analysis = None
         
         if len(available_analysis_prompts) > 1:
-            # 현재 활성 프롬프트 제외
-            other_prompts = [p for p in available_analysis_prompts if not p.startswith(f"{st.session_state.active_prompt_name}_")]
-            if other_prompts:
-                # 현재 활성 프롬프트를 기본값으로 설정
-                current_analysis_name = f"{st.session_state.active_prompt_name}_query_analysis"
-                default_option = current_analysis_name if current_analysis_name in available_analysis_prompts else other_prompts[0]
-                
-                source_prompt_analysis = st.selectbox(
-                    "다른 프롬프트에서 불러오기",
-                    options=[default_option] + [p for p in other_prompts if p != default_option],
-                    key="source_analysis"
-                )
+            # 현재 선택된 프롬프트의 인덱스 찾기
+            try:
+                current_index = available_analysis_prompts.index(st.session_state.selected_analysis_prompt)
+            except ValueError:
+                current_index = 0
+                st.session_state.selected_analysis_prompt = available_analysis_prompts[0]
+            
+            selected_analysis_prompt = st.selectbox(
+                "🔄 질문 분석 프롬프트 선택:",
+                options=available_analysis_prompts,
+                index=current_index,
+                key="analysis_prompt_selector",
+                help="사용할 질문 분석 프롬프트를 선택하세요."
+            )
+            
+            # 선택이 변경된 경우 업데이트
+            if selected_analysis_prompt != st.session_state.selected_analysis_prompt:
+                st.session_state.selected_analysis_prompt = selected_analysis_prompt
+                # 에이전트 재초기화 필요
+                st.session_state.agent = None
+                st.success(f"✅ 질문 분석 프롬프트가 '{selected_analysis_prompt}'로 변경되었습니다!")
+                st.rerun()
+        
+        source_prompt_analysis = st.session_state.selected_analysis_prompt
         
         # 편집 가능한 텍스트 영역
-        initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
+        # 선택된 프롬프트에서 내용 가져오기
         if source_prompt_analysis:
             source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_analysis, "query_analysis")
             if source_data:
                 initial_analysis_content = source_data.get('content', '')
+            else:
+                initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
+        else:
+            initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
         
         new_analysis_prompt = st.text_area(
             "질문 분석 프롬프트 편집",
@@ -1032,35 +1072,51 @@ def render_individual_prompt_sections():
                 st.rerun()
     
     # 최종 답변 프롬프트 섹션
-    with st.expander(f"💬 최종 답변 프롬프트 - {st.session_state.active_prompt_name}", expanded=False):
+    with st.expander(f"💬 최종 답변 프롬프트 - {st.session_state.selected_response_prompt}", expanded=False):
         response_summary = extract_prompt_summary(current_prompt.get('model_response_prompt', ''))
         st.markdown(f'<div class="prompt-info">특징: {response_summary}</div>', unsafe_allow_html=True)
         st.caption(f"📝 {len(current_prompt.get('model_response_prompt', '')):,}자")
         
-        # 프롬프트 선택 (최종 답변용) - 여러 개 있을 때만 표시
+        # 프롬프트 선택 (최종 답변용)
         available_response_prompts = st.session_state.prompt_manager.get_prompt_list_by_type("model_response")
-        source_prompt_response = None
         
         if len(available_response_prompts) > 1:
-            # 현재 활성 프롬프트 제외
-            other_prompts = [p for p in available_response_prompts if not p.startswith(f"{st.session_state.active_prompt_name}_")]
-            if other_prompts:
-                # 현재 활성 프롬프트를 기본값으로 설정
-                current_response_name = f"{st.session_state.active_prompt_name}_model_response"
-                default_option = current_response_name if current_response_name in available_response_prompts else other_prompts[0]
-                
-                source_prompt_response = st.selectbox(
-                    "다른 프롬프트에서 불러오기",
-                    options=[default_option] + [p for p in other_prompts if p != default_option],
-                    key="source_response"
-                )
+            # 현재 선택된 프롬프트의 인덱스 찾기
+            try:
+                current_index = available_response_prompts.index(st.session_state.selected_response_prompt)
+            except ValueError:
+                current_index = 0
+                st.session_state.selected_response_prompt = available_response_prompts[0]
+            
+            selected_response_prompt = st.selectbox(
+                "🔄 최종 답변 프롬프트 선택:",
+                options=available_response_prompts,
+                index=current_index,
+                key="response_prompt_selector",
+                help="사용할 최종 답변 프롬프트를 선택하세요."
+            )
+            
+            # 선택이 변경된 경우 업데이트
+            if selected_response_prompt != st.session_state.selected_response_prompt:
+                st.session_state.selected_response_prompt = selected_response_prompt
+                # 에이전트 재초기화 필요
+                st.session_state.agent = None
+                st.success(f"✅ 최종 답변 프롬프트가 '{selected_response_prompt}'로 변경되었습니다!")
+                st.rerun()
+        
+        source_prompt_response = st.session_state.selected_response_prompt
         
         # 편집 가능한 텍스트 영역
-        initial_response_content = current_prompt.get('model_response_prompt', '')
+        # 선택된 프롬프트에서 내용 가져오기
         if source_prompt_response:
             source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_response, "model_response")
             if source_data:
                 initial_response_content = source_data.get('content', '')
+            else:
+                initial_response_content = current_prompt.get('model_response_prompt', '')
+        else:
+            initial_response_content = current_prompt.get('model_response_prompt', '')
+            
         if hasattr(st.session_state, 'temp_response_content'):
             initial_response_content = st.session_state.temp_response_content
             del st.session_state.temp_response_content
@@ -1148,6 +1204,7 @@ def save_prompt_section(current_prompt, section_key, new_content):
         st.error(f"❌ 저장 실패: {e}")
         return False
 
+
 def save_prompt_as_new(new_name, analysis_content, response_content, section_type):
     """새로운 이름으로 프롬프트 저장 (타입별 독립 저장)"""
     try:
@@ -1161,12 +1218,12 @@ def save_prompt_as_new(new_name, analysis_content, response_content, section_typ
             # 질문 분석 프롬프트만 저장
             prompt_type = "query_analysis"
             content = analysis_content
-            prompt_name = f"{new_name}_query_analysis"
+            prompt_name = new_name  # suffix 제거
         elif section_type == 'response':
             # 최종 답변 프롬프트만 저장
             prompt_type = "model_response"
             content = response_content
-            prompt_name = f"{new_name}_model_response"
+            prompt_name = new_name  # suffix 제거
         else:
             st.error("❌ 유효하지 않은 섹션 타입입니다.")
             return False
