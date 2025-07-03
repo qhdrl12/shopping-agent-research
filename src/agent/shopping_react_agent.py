@@ -22,6 +22,7 @@ from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp import ClientSession, McpError
 from mcp.client.streamable_http import streamablehttp_client
+from src.tools.datetime import get_current_time
 
 # 에이전트가 사용할 특정 도구 목록 (현재 코드에서는 직접 사용되지 않음)
 target_tools = ["tavily_search"]
@@ -59,7 +60,7 @@ async def get_zapier_mcp(
             # print(f"wrap_tool: {wrap_tool}")
             # tools.append(wrap_tool)
             tools.append(langchian_tool)
-
+        
         return tools
 
 
@@ -205,7 +206,10 @@ async def get_tools():
     )    
 
     # 설정된 모든 서버에서 도구를 비동기적으로 가져옴
-    return await client.get_tools()
+    tools = await client.get_tools()
+    print(f"tools: {tools}")
+    # tools.append(get_current_time)
+    return tools
 
 
 async def build_agent() -> CompiledStateGraph:
@@ -215,7 +219,8 @@ async def build_agent() -> CompiledStateGraph:
     """
 
     # 사용할 LLM 설정 (GPT-4.1-mini)
-    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
+    # llm = ChatOpenAI(model="o4-mini", reasoning_effort="medium")
+    llm = ChatOpenAI(model="gpt-4.1")
 
     # `get_tools` 함수를 호출하여 에이전트가 사용할 도구 목록을 가져옴
     tools = await get_tools()
@@ -235,7 +240,7 @@ async def main():
     tools = await get_zapier_mcp()
     
     # LLM 설정
-    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
+    llm = ChatOpenAI(model="gpt-4.1", temperature=0)
 
     # LLM과 Zapier 도구로 ReAct 에이전트 생성
     agent = create_react_agent(llm, tools)

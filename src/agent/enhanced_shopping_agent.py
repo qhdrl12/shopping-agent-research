@@ -51,14 +51,34 @@ from utils.text_processing import (
 load_dotenv()
 
 
-class QueryAnalysis(BaseModel):
-    """질문 분석 결과를 위한 구조화된 모델"""
-    main_product: str = Field(description="주요 상품/카테고리")
-    # specific_requirements: Dict[str, str] = Field(description="구체적 요구사항 (색상, 크기, 브랜드 등)")
+class BasicAnalysis(BaseModel):
+    """기본 정보 추출 결과"""
+    main_product: str = Field(description="주요 상품명")
+    search_keywords: List[str] = Field(description="검색 키워드 최대 5개, 중요도 순", max_items=5)
     price_range: str = Field(description="가격대 정보")
-    search_keywords: List[str] = Field(description="검색에 사용할 키워드 리스트", max_items=5)
     target_categories: List[str] = Field(description="대상 카테고리")
-    search_intent: str = Field(description="검색 의도 (구매, 비교, 정보수집 등)")
+    search_intent: str = Field(description="검색 의도 (구매, 비교, 정보수집, 추천)")
+
+class RoutingStrategy(BaseModel):
+    """라우팅 전략 결정 결과"""
+    complexity_level: str = Field(description="복잡도 수준 (단순, 중간, 복잡, 매우복잡)")
+    information_depth: str = Field(description="정보 깊이 (기본, 상세, 전문)")
+    routing_decision: str = Field(description="라우팅 결정 (simple_search, detailed_search, comprehensive_search)")
+    recommended_sources: List[str] = Field(description="추천 검색 소스")
+    scraping_targets: List[str] = Field(description="스크래핑 대상")
+
+class ExecutionPlan(BaseModel):
+    """실행 계획"""
+    primary_search_query: str = Field(description="주요 검색 쿼리")
+    secondary_search_queries: List[str] = Field(description="보조 검색 쿼리")
+    expected_results_count: int = Field(description="예상 결과 수")
+    scraping_priority: List[str] = Field(description="스크래핑 우선순위")
+
+class QueryAnalysis(BaseModel):
+    """고도화된 쿼리 분석 결과"""
+    basic_analysis: BasicAnalysis
+    routing_strategy: RoutingStrategy
+    execution_plan: ExecutionPlan
 
 
 class ShoppingAgentState(TypedDict):
@@ -66,8 +86,9 @@ class ShoppingAgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     user_query: str
     
-    # 질문 분석 결과
+    # 질문 분석 결과 (고도화된 구조)
     analyzed_query: Dict[str, Any]
+    routing_decision: str  # simple_search, detailed_search, comprehensive_search
     search_keywords: List[str]
     target_categories: List[str]
     
@@ -213,55 +234,83 @@ class EnhancedShoppingAgent:
         
     def create_workflow(self) -> CompiledStateGraph:
         """
-        LangGraph 워크플로우를 생성하고 컴파일합니다.
+        라우팅 기반 LangGraph 워크플로우를 생성하고 컴파일합니다.
         
         Returns:
             CompiledStateGraph: 실행 가능한 워크플로우 그래프
             
         Workflow:
-            analyze_query → pre_search → pre_scrape → react_agent → END
+            analyze_query → [routing_decision] → simple_search/detailed_search/comprehensive_search → react_agent → END
             
         Note:
-            각 노드는 순차적으로 실행되며, 이전 단계의 결과를 다음 단계에서 활용
+            라우팅 결정에 따라 다른 경로로 실행됩니다.
         """
         workflow = StateGraph(ShoppingAgentState)
         
-        # 노드 추가 - 각 단계별 처리 함수 연결
-        workflow.add_node("analyze_query", self.analyze_query)    # 1단계: 질문 분석
-        workflow.add_node("pre_search", self.pre_search)          # 2단계: 사전 검색
-        workflow.add_node("pre_scrape", self.pre_scrape)          # 3단계: 사전 스크래핑
-        workflow.add_node("react_agent", self.call_agent)         # 4단계: 최종 답변 생성
+        # 노드 추가
+        workflow.add_node("analyze_query", self.analyze_query)
+        workflow.add_node("simple_search", self.simple_search)
+        workflow.add_node("detailed_search", self.detailed_search) 
+        workflow.add_node("comprehensive_search", self.comprehensive_search)
+        workflow.add_node("react_agent", self.call_agent)
         
-        # 워크플로우 경로 정의 (선형 실행)
+        # 진입점 설정
         workflow.set_entry_point("analyze_query")
-        workflow.add_edge("analyze_query", "pre_search")
-        workflow.add_edge("pre_search", "pre_scrape")
-        workflow.add_edge("pre_scrape", "react_agent")
+        
+        # 조건부 라우팅 설정
+        workflow.add_conditional_edges(
+            "analyze_query",
+            self.route_decision,
+            {
+                "simple_search": "simple_search",
+                "detailed_search": "detailed_search", 
+                "comprehensive_search": "comprehensive_search"
+            }
+        )
+        
+        # 각 검색 노드에서 최종 응답으로
+        workflow.add_edge("simple_search", "react_agent")
+        workflow.add_edge("detailed_search", "react_agent")
+        workflow.add_edge("comprehensive_search", "react_agent")
         workflow.add_edge("react_agent", END)
         
         return workflow.compile()
     
+    def route_decision(self, state: ShoppingAgentState) -> str:
+        """
+        분석 결과에 따라 라우팅 결정을 내립니다.
+        
+        Args:
+            state: 현재 상태
+            
+        Returns:
+            str: 라우팅 결정 ("simple_search", "detailed_search", "comprehensive_search")
+        """
+        routing_decision = state.get("routing_decision", "detailed_search")
+        print(f"🎯 라우팅 결정: {routing_decision}")
+        return routing_decision
+    
     async def analyze_query(self, state: ShoppingAgentState) -> ShoppingAgentState:
         """
-        1단계: 사용자 질문을 구조화된 정보로 분석합니다.
+        1단계: 사용자 질문을 고도화된 구조로 분석하고 라우팅 결정을 내립니다.
         
         Args:
             state (ShoppingAgentState): 현재 에이전트 상태
             
         Returns:
-            ShoppingAgentState: 분석 결과가 추가된 상태
+            ShoppingAgentState: 분석 결과 및 라우팅 결정이 추가된 상태
             
         Process:
-            1. Structured Output을 사용하여 안정적인 파싱
-            2. 검색 키워드, 상품 카테고리, 가격대 등 추출
-            3. 쇼핑 의도 분석 (구매, 비교, 정보수집 등)
+            1. 고도화된 프롬프트로 3단계 분석 (기본분석, 라우팅전략, 실행계획)
+            2. 복잡도 수준에 따른 라우팅 결정
+            3. 실행 계획 기반 검색 전략 수립
             
         Key Output:
-            - analyzed_query: 구조화된 분석 결과
-            - search_keywords: 다음 단계에서 사용할 검색 키워드
-            - target_categories: 상품 카테고리 정보
+            - analyzed_query: 3단계 구조화된 분석 결과
+            - routing_decision: 라우팅 결정 (simple_search/detailed_search/comprehensive_search)
+            - search_keywords: 실행 계획 기반 키워드
         """
-        print("\n=== [1/4] 질문 분석 노드 시작 ===")
+        print("\n=== [1/4] 고도화된 질문 분석 노드 시작 ===")
         user_query = state["user_query"]
         print(f"🎯 분석할 질문: {user_query}")
         
@@ -276,27 +325,229 @@ class EnhancedShoppingAgent:
             analyzed_data = analysis_result.model_dump()
             
             state["analyzed_query"] = analyzed_data
-            state["search_keywords"] = analyzed_data.get("search_keywords", [])
-            state["target_categories"] = analyzed_data.get("target_categories", [])
+            
+            # 기본 분석에서 정보 추출
+            basic_analysis = analyzed_data.get("basic_analysis", {})
+            routing_strategy = analyzed_data.get("routing_strategy", {})
+            execution_plan = analyzed_data.get("execution_plan", {})
+            
+            state["search_keywords"] = basic_analysis.get("search_keywords", [])
+            state["target_categories"] = basic_analysis.get("target_categories", [])
+            state["routing_decision"] = routing_strategy.get("routing_decision", "detailed_search")
             state["processing_status"] = "질문 분석 완료"
             
-            print(f"✅ 분석 완료:")
-            print(f"   - 주요 상품: {analyzed_data.get('main_product')}")
-            print(f"   - 가격대: {analyzed_data.get('price_range')}")
-            print(f"   - 검색 키워드: {analyzed_data.get('search_keywords')}")
-            print(f"   - 검색 의도: {analyzed_data.get('search_intent')}")
+            print(f"✅ 고도화된 분석 완료:")
+            print(f"   - 주요 상품: {basic_analysis.get('main_product')}")
+            print(f"   - 가격대: {basic_analysis.get('price_range')}")
+            print(f"   - 검색 키워드: {basic_analysis.get('search_keywords')}")
+            print(f"   - 복잡도 수준: {routing_strategy.get('complexity_level')}")
+            print(f"   - 라우팅 결정: {routing_strategy.get('routing_decision')}")
+            print(f"   - 주요 검색 쿼리: {execution_plan.get('primary_search_query')}")
             
         except Exception as e:
             import traceback
             print(f"❌ 질문 분석 실패: {str(e)}")
-            print(f"🐛 상세 트레이스백:\n{traceback.format_exc()}") # 전체 트레이스백 출력
+            print(f"🐛 상세 트레이스백:\n{traceback.format_exc()}")
             state["error_info"] = f"질문 분석 실패: {str(e)}\n{traceback.format_exc()}"
             state["processing_status"] = "질문 분석 실패"
             # 기본값 설정
             state["search_keywords"] = [user_query]
             state["target_categories"] = ["일반"]
-            print(f"🔧 기본값 설정: 키워드=[{user_query}], 카테고리=[일반]")
+            state["routing_decision"] = "detailed_search"  # 실패 시 기본 라우팅
+            print(f"🔧 기본값 설정: 키워드=[{user_query}], 라우팅=detailed_search")
             
+        return state
+    
+    async def simple_search(self, state: ShoppingAgentState) -> ShoppingAgentState:
+        """
+        단순 검색 경로: 기본 웹 검색만 수행
+        
+        - 명확한 단일 상품 검색
+        - 기본적인 정보만 필요
+        - 브랜드명이나 구체적 모델명 포함된 질문
+        """
+        print("\n=== [2/4] 단순 검색 노드 시작 ===")
+        search_keywords = state["search_keywords"]
+        analyzed_query = state.get("analyzed_query", {})
+        execution_plan = analyzed_query.get("execution_plan", {})
+        
+        # 주요 검색 쿼리 사용
+        primary_query = execution_plan.get("primary_search_query", " ".join(search_keywords[:2]))
+        print(f"🔍 주요 검색 쿼리: {primary_query}")
+        
+        try:
+            # 단순 검색 - 최소한의 결과만 수집
+            tavily_tool = self.tools["tavily_search_tool"]
+            response = tavily_tool.invoke({
+                "query": primary_query,
+                "search_depth": "basic",
+                "max_results": 5  # 단순 검색은 5개만
+            })
+            
+            search_results = []
+            relevant_urls = []
+            
+            for result in response.get("results", []):
+                search_results.append({
+                    "keyword": primary_query,
+                    "title": result.get("title"),
+                    "url": result.get("url"),
+                    "content": result.get("content"),
+                    "score": result.get("score", 0),
+                    "relevance_score": self._calculate_relevance_score(result, primary_query)
+                })
+                
+                if result.get("url"):
+                    relevant_urls.append(result["url"])
+            
+            state["search_results"] = search_results
+            state["relevant_urls"] = relevant_urls
+            state["scraped_content"] = {}  # 단순 검색은 스크래핑 없음
+            state["product_data"] = []
+            state["processing_status"] = f"단순 검색 완료 ({len(search_results)}개 결과)"
+            
+            print(f"✅ 단순 검색 완료: {len(search_results)}개 결과")
+            
+        except Exception as e:
+            print(f"❌ 단순 검색 실패: {str(e)}")
+            state["error_info"] = f"단순 검색 실패: {str(e)}"
+            state["processing_status"] = "단순 검색 실패"
+            state["search_results"] = []
+            state["relevant_urls"] = []
+            
+        return state
+    
+    async def detailed_search(self, state: ShoppingAgentState) -> ShoppingAgentState:
+        """
+        상세 검색 경로: 웹 검색 + 선별적 스크래핑
+        
+        - 일반적인 상품 카테고리 검색
+        - 2-3개 조건 조합
+        - 브랜드 비교나 기본 스펙 비교 필요
+        """
+        print("\n=== [2/4] 상세 검색 노드 시작 ===")
+        
+        # 기존 pre_search와 pre_scrape 로직을 통합하여 실행
+        state = await self.pre_search(state)
+        if state.get("search_results"):
+            state = await self.pre_scrape(state)
+        
+        state["processing_status"] = "상세 검색 완료"
+        return state
+    
+    async def comprehensive_search(self, state: ShoppingAgentState) -> ShoppingAgentState:
+        """
+        종합 검색 경로: 다중 소스 검색 + 전면적 스크래핑
+        
+        - 다중 카테고리 검색
+        - 전문가 수준의 분석 필요
+        - 시장 동향이나 트렌드 분석 포함
+        """
+        print("\n=== [2/4] 종합 검색 노드 시작 ===")
+        search_keywords = state["search_keywords"]
+        analyzed_query = state.get("analyzed_query", {})
+        execution_plan = analyzed_query.get("execution_plan", {})
+        
+        # 보조 검색 쿼리도 포함하여 확장 검색
+        primary_query = execution_plan.get("primary_search_query", " ".join(search_keywords[:2]))
+        secondary_queries = execution_plan.get("secondary_search_queries", search_keywords[2:])
+        
+        all_queries = [primary_query] + secondary_queries[:2]  # 최대 3개 쿼리
+        print(f"🔍 종합 검색 쿼리: {all_queries}")
+        
+        try:
+            search_results = []
+            relevant_urls = []
+            
+            # 다중 쿼리 검색
+            for query in all_queries:
+                tavily_tool = self.tools["tavily_search_tool"]
+                response = tavily_tool.invoke({
+                    "query": query,
+                    "search_depth": "advanced",
+                    "max_results": 8  # 종합 검색은 더 많은 결과
+                })
+                
+                for result in response.get("results", []):
+                    search_results.append({
+                        "keyword": query,
+                        "title": result.get("title"),
+                        "url": result.get("url"),
+                        "content": result.get("content"),
+                        "score": result.get("score", 0),
+                        "relevance_score": self._calculate_relevance_score(result, query)
+                    })
+                    
+                    if result.get("url"):
+                        relevant_urls.append(result["url"])
+            
+            # 중복 제거 및 정렬
+            relevant_urls = list(set(relevant_urls))
+            search_results.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+            
+            state["search_results"] = search_results
+            state["relevant_urls"] = relevant_urls
+            
+            # 확장 스크래핑 실행
+            if relevant_urls:
+                state = await self.comprehensive_scrape(state)
+            
+            state["processing_status"] = f"종합 검색 완료 ({len(search_results)}개 결과)"
+            print(f"✅ 종합 검색 완료: {len(search_results)}개 결과")
+            
+        except Exception as e:
+            print(f"❌ 종합 검색 실패: {str(e)}")
+            state["error_info"] = f"종합 검색 실패: {str(e)}"
+            state["processing_status"] = "종합 검색 실패"
+            state["search_results"] = []
+            state["relevant_urls"] = []
+            
+        return state
+    
+    async def comprehensive_scrape(self, state: ShoppingAgentState) -> ShoppingAgentState:
+        """종합 검색용 확장 스크래핑"""
+        print("\n=== 종합 스크래핑 시작 ===")
+        relevant_urls = state["relevant_urls"]
+        search_results = state.get("search_results", [])
+        
+        # 더 많은 URL 스크래핑 (최대 8개)
+        max_urls = min(8, len(relevant_urls))
+        best_urls = self._select_best_urls_for_scraping(relevant_urls, search_results, max_urls)
+        
+        scraped_content = {}
+        product_data = []
+        
+        for url in best_urls:
+            try:
+                firecrawl_tool = self.tools["firecrawl_scrape_tool"]
+                scrape_result = firecrawl_tool.invoke({
+                    "url": url,
+                    "content_max_length": self.config.scraping.content_max_length * 2  # 더 긴 콘텐츠
+                })
+                
+                if scrape_result.get("success"):
+                    content = scrape_result["content"]
+                    title = scrape_result["title"]
+                    
+                    scraped_content[url] = {
+                        "title": title,
+                        "content": content,
+                        "timestamp": datetime.now().isoformat(),
+                        "content_length": scrape_result["content_length"],
+                        "content_truncated": scrape_result.get("content_truncated", False)
+                    }
+                    
+                    extracted_product = self._extract_product_info(content, url)
+                    if extracted_product:
+                        product_data.append(extracted_product)
+                        
+            except Exception as e:
+                print(f"❌ URL 스크래핑 실패 {url}: {str(e)}")
+        
+        state["scraped_content"] = scraped_content
+        state["product_data"] = product_data
+        
+        print(f"✅ 종합 스크래핑 완료: {len(scraped_content)}개 URL, {len(product_data)}개 상품")
         return state
     
     async def pre_search(self, state: ShoppingAgentState) -> ShoppingAgentState:

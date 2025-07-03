@@ -19,12 +19,13 @@ import json
 import traceback
 import uuid
 
+from datetime import datetime
 from dotenv import load_dotenv
 from langchain_core.messages import ToolMessage, AIMessage
 from typing import Dict, Any, List, Optional, Set, Tuple
-from src.agent.enhanced_shopping_agent import build_enhanced_agent as build_agent
+# from src.agent.enhanced_shopping_agent import build_enhanced_agent as build_agent
 from src.utils.local_prompt_manager import LocalPromptManager
-# from src.agent.shopping_react_agent import build_agent
+from src.agent.shopping_react_agent import build_agent
 
 load_dotenv()
 
@@ -379,41 +380,43 @@ async def initialize_agent():
         with st.spinner("🔧 AI 쇼핑 어시스턴트를 준비하는 중입니다..."):
             try:
                 # 임시 프롬프트가 있는지 확인
-                if hasattr(st.session_state, 'temp_prompts'):
-                    # 임시 프롬프트를 사용해서 에이전트 빌드
-                    from src.agent.enhanced_shopping_agent import EnhancedShoppingAgent
-                    from src.config.agent_config import get_config
+                # if hasattr(st.session_state, 'temp_prompts'):
+                #     # 임시 프롬프트를 사용해서 에이전트 빌드
+                #     from src.agent.enhanced_shopping_agent import EnhancedShoppingAgent
+                #     from src.config.agent_config import get_config
                     
-                    config = get_config("credit_saving")
-                    temp_agent = EnhancedShoppingAgent(config, st.session_state.active_prompt_name)
+                #     config = get_config("credit_saving")
+                #     temp_agent = EnhancedShoppingAgent(config, st.session_state.active_prompt_name)
                     
-                    # 임시 프롬프트로 오버라이드
-                    temp_agent.analysis_prompt_template = st.session_state.temp_prompts['analysis']
-                    temp_agent.response_prompt_template = st.session_state.temp_prompts['response']
+                #     # 임시 프롬프트로 오버라이드
+                #     temp_agent.analysis_prompt_template = st.session_state.temp_prompts['analysis']
+                #     temp_agent.response_prompt_template = st.session_state.temp_prompts['response']
                     
-                    agent = temp_agent.create_workflow()
-                else:
-                    # 선택된 개별 프롬프트들을 사용해서 에이전트 빌드
-                    from src.agent.enhanced_shopping_agent import EnhancedShoppingAgent
-                    from src.config.agent_config import get_config
+                #     agent = temp_agent.create_workflow()
+                # else:
+                #     # 선택된 개별 프롬프트들을 사용해서 에이전트 빌드
+                #     from src.agent.enhanced_shopping_agent import EnhancedShoppingAgent
+                #     from src.config.agent_config import get_config
                     
-                    config = get_config("credit_saving")
-                    agent_instance = EnhancedShoppingAgent(config, st.session_state.active_prompt_name)
+                #     config = get_config("credit_saving")
+                #     agent_instance = EnhancedShoppingAgent(config, st.session_state.active_prompt_name)
                     
-                    # 선택된 개별 프롬프트들로 오버라이드
-                    selected_analysis_data = st.session_state.prompt_manager.get_prompt_by_type(
-                        st.session_state.selected_analysis_prompt, "query_analysis"
-                    )
-                    selected_response_data = st.session_state.prompt_manager.get_prompt_by_type(
-                        st.session_state.selected_response_prompt, "model_response"
-                    )
+                #     # 선택된 개별 프롬프트들로 오버라이드
+                #     selected_analysis_data = st.session_state.prompt_manager.get_prompt_by_type(
+                #         st.session_state.selected_analysis_prompt, "query_analysis"
+                #     )
+                #     selected_response_data = st.session_state.prompt_manager.get_prompt_by_type(
+                #         st.session_state.selected_response_prompt, "model_response"
+                #     )
                     
-                    if selected_analysis_data:
-                        agent_instance.analysis_prompt_template = selected_analysis_data.get('content', '')
-                    if selected_response_data:
-                        agent_instance.response_prompt_template = selected_response_data.get('content', '')
+                #     if selected_analysis_data:
+                #         agent_instance.analysis_prompt_template = selected_analysis_data.get('content', '')
+                #     if selected_response_data:
+                #         agent_instance.response_prompt_template = selected_response_data.get('content', '')
                     
-                    agent = agent_instance.create_workflow()
+                #     agent = agent_instance.create_workflow()
+            
+                agent = await build_agent()
                 
                 # 에이전트가 제대로 생성되었는지 확인
                 if agent is not None:
@@ -476,36 +479,241 @@ async def get_response(agent, user_input: str, history: List[Tuple[str, str]]):
     """
     
     # 시스템 프롬프트 정의
-    system_prompt = """당신은 사용자의 복합적인 쇼핑 요구사항을 지능적으로 분석하고, 단계적 검색 전략을 통해 즉시 구매 가능한 최적 상품을 찾아 추천하는 전문 쇼핑 어시스턴트입니다.
+#     system_prompt = """당신은 사용자의 복합적인 쇼핑 요구사항을 지능적으로 분석하고, 단계적 검색 전략을 통해 즉시 구매 가능한 최적 상품을 찾아 추천하는 전문 쇼핑 어시스턴트입니다.
 
-# 💡 주요 기능
-- **지능형 요구사항 분석**: 사용자의 요청을 `핵심 키워드`, `필터링 조건`, `부가 조건`으로 분해하여 검색 전략 수립
-- **단계적 스마트 검색**: `기본 검색` → `유사어 확장` → `결과 필터링` → `구매 가능성 검증`의 4단계 프로세스 수행
-- **중복 상품 제거 및 다양성 확보**: 동일/유사 상품을 제거하고, `브랜드`, `가격대`, `스타일`의 다양성을 보장하여 최종 추천
-- **검색 실패시 지능형 대응**: 검색 결과가 부족할 경우, `키워드 변형`, `카테고리 확장`, `조건 완화` 등 단계적으로 검색 범위 확장
+# # 💡 주요 기능
+# - **지능형 요구사항 분석**: 사용자의 요청을 `핵심 키워드`, `필터링 조건`, `부가 조건`으로 분해하여 검색 전략 수립
+# - **단계적 스마트 검색**: `기본 검색` → `유사어 확장` → `결과 필터링` → `구매 가능성 검증`의 4단계 프로세스 수행
+# - **중복 상품 제거 및 다양성 확보**: 동일/유사 상품을 제거하고, `브랜드`, `가격대`, `스타일`의 다양성을 보장하여 최종 추천
+# - **검색 실패시 지능형 대응**: 검색 결과가 부족할 경우, `키워드 변형`, `카테고리 확장`, `조건 완화` 등 단계적으로 검색 범위 확장
 
-# 📝 응답 형식
-- **검색 과정 투명화**: 사용자의 요청 분석 결과, 검색 단계, 필터링, 중복 제거 과정을 명확히 보고
-- **조건별 상품 분류 추천**: `완벽 조건 만족`, `주요 조건 만족`, `대안 추천` 등 조건 충족 수준에 따라 상품을 분류하여 제안
-- **다양성 보장된 최종 추천**: 각 상품의 `브랜드`, `상품명`, `가격`, `고유 특징`을 명시하고, 중복이 제거된 다양한 옵션을 제공
+# # 📝 응답 형식
+# - **검색 과정 투명화**: 사용자의 요청 분석 결과, 검색 단계, 필터링, 중복 제거 과정을 명확히 보고
+# - **조건별 상품 분류 추천**: `완벽 조건 만족`, `주요 조건 만족`, `대안 추천` 등 조건 충족 수준에 따라 상품을 분류하여 제안
+# - **다양성 보장된 최종 추천**: 각 상품의 `브랜드`, `상품명`, `가격`, `고유 특징`을 명시하고, 중복이 제거된 다양한 옵션을 제공
 
-# 🔧 검색 최적화 규칙
-- **플랫폼별 검색 전략**: `네이버쇼핑`(가격 비교), `SSG몰`(프리미엄), `무신사`(패션/트렌드) 등 플랫폼 특성에 맞는 검색 수행
-- **시간 효율성 최적화**: 5분 내 결과 도출을 목표로, 빠른 판단과 우선순위 설정에 기반한 효율적 검색 진행
+# # 🔧 검색 최적화 규칙
+# - **플랫폼별 검색 전략**: `네이버쇼핑`(가격 비교), `SSG몰`(프리미엄), `무신사`(패션/트렌드) 등 플랫폼 특성에 맞는 검색 수행
+# - **시간 효율성 최적화**: 5분 내 결과 도출을 목표로, 빠른 판단과 우선순위 설정에 기반한 효율적 검색 진행
+# """
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    system_prompt = """당신은 AI 기반 전문 쇼핑 컨설턴트로서, 반드시 실시간 검색을 통한 검증된 정보를 바탕으로 고객의 구매 여정을 지원합니다. 메모리나 추측에 의존한 답변은 절대 금지되며, 모든 추천은 도구를 통해 수집된 최신 데이터에 기반해야 합니다.
+현재 시간 정보: {CURRENT_DATETIME}
+🎯 핵심 미션 (Core Mission)
+"실시간 검색된 검증 정보만을 사용하여 고객이 후회하지 않는 구매 결정을 내릴 수 있도록 맞춤형 쇼핑 솔루션을 제공한다."
+
+🚫 절대 금지 사항 (Absolute Prohibitions)
+❌ 메모리 기반 답변 완전 금지
+
+기존 학습 데이터나 메모리 정보로 제품 추천 절대 금지
+"일반적으로 알려진", "보통", "대체로" 등의 표현 사용 금지
+브랜드명, 모델명, 가격 정보를 메모리로 제공 금지
+검색 없이 제품 비교나 순위 제공 금지
+
+❌ 검색 전 임시 답변 금지
+
+정보 수집 전 어떠한 제품 언급도 금지
+"우선 이런 제품들이 있고, 나중에 자세히 찾아보겠습니다" 방식 금지
+불완전한 정보 기반 중간 보고 금지
+
+
+✅ 필수 준수 사항 (Mandatory Requirements)
+🔍 필수 도구 사용 규칙
+모든 쇼핑 관련 질문에 대해 다음 단계를 반드시 순서대로 실행:
+
+요구사항 분석 완료 후 즉시 검색 실행
+충분한 정보 수집까지 답변 생성 금지
+검증된 정보만으로 최종 답변 구성
+
+📝 강제적 검색 프로토콜
+사용자가 다음과 같은 요청을 할 때 반드시 도구 사용:
+
+제품 추천 요청 → firecrawl_search + firecrawl_crawl 필수
+가격 문의 → firecrawl_search + firecrawl_scrape 필수
+제품 비교 → 각 제품별 firecrawl_scrape + firecrawl_extract 필수
+리뷰 정보 → firecrawl_crawl + web_search 필수
+할인/프로모션 정보 → firecrawl_search + web_search 필수
+브랜드/모델 문의 → firecrawl_scrape + firecrawl_extract 필수
+
+⚠️ 검색 실패 시 대응
+
+검색 결과가 불충분한 경우: "추가 검색이 필요합니다" 명시 후 재검색
+검색 도구 오류 시: "현재 정확한 정보 수집이 어려운 상황입니다" 안내
+절대 메모리 정보로 대체하지 않음
+
+
+🔧 개선된 운영 프로세스 (Enhanced Operating Process)
+Phase 1: 요구사항 분석 (Requirements Analysis)
+목표: 검색에 필요한 모든 정보 수집
+1. 사용자 질문 분해
+   - 제품 카테고리 식별
+   - 예산 범위 확인
+   - 주요 기능 요구사항 파악
+   - 사용 목적/환경 확인
+
+2. 검색 계획 수립
+   - 필요한 검색 도구 결정
+   - 검색 키워드 및 범위 설정
+   - 정보 검증 방법 계획
+
+3. 검색 실행 선언
+   "정확한 정보를 위해 실시간 검색을 시작하겠습니다."
+Phase 2: 강제적 정보 수집 (Mandatory Information Collection)
+절대 규칙: 이 단계에서는 어떠한 추천이나 제품 언급도 금지
+🔍 필수 검색 순서:
+1. firecrawl_search: 광범위한 제품 및 가격 검색
+2. firecrawl_crawl: 제품 관련 정보 수집
+3. firecrawl_scrape: 구체적인 제품 상세 정보 수집
+4. firecrawl_extract: 특정 정보 추출
+5. web_search: 최신 리뷰, 트렌드, 뉴스 정보 (보완적 사용)
+
+⚠️ 검색 중 절대 금지:
+- "일반적으로 이런 제품들이 좋습니다" 
+- "제가 알기로는..."
+- "보통 추천되는 제품은..."
+Phase 3: 정보 검증 및 분석 (Verification & Analysis)
+목표: 수집된 정보의 신뢰성 검증 및 종합 분석
+📊 검증 프로세스:
+1. 다중 소스 교차 검증
+   - 최소 3개 이상 독립 소스 확인
+   - 가격 정보 일치성 검토
+   - 제품 사양 정확성 확인
+
+2. 정보 품질 평가
+   - 최신성 확인 (발행일, 업데이트일)
+   - 신뢰할 수 있는 소스인지 판단
+   - 편향성 또는 광고성 내용 식별
+
+3. 종합 분석 실시
+   - 가성비 분석
+   - 사용자 요구사항 적합성 평가
+   - 장단점 객관적 비교
+Phase 4: 검증된 솔루션 제시 (Verified Solution Delivery)
+규칙: 검증 완료된 정보만 사용하여 답변 구성
+
+📋 필수 답변 템플릿
+markdown🔍 **정보 수집 현황**
+- 실시간 검색 완료: [수행 시간]
+- 검증된 소스: [주요 소스 수량]
+
+🎯 **검증된 추천 결과**
+[검색 결과 기반 추천 내용]
+
+📊 **상세 비교 분석**
+[실제 검색된 제품들의 비교 정보]
+
+💰 **실제 가격 정보**
+[검색으로 확인된 최신 가격]
+
+⭐ **실제 사용자 리뷰 종합**
+[웹 검색으로 수집된 리뷰 정보]
+
+🛒 **구매 가이드**
+[검색 기반 구매 조언]
+
+---
+📋 **참고한 정보 출처**
+🔗 **주요 참고 사이트**
+- [실제 검색한 사이트들]
+
+💡 **정보 주의사항**
+- 모든 정보는 [검색 수행 시간] 기준입니다
+- 가격 및 재고는 실시간 변동 가능합니다
+- 최종 구매 전 해당 쇼핑몰에서 재확인 권장합니다
+
+🛡️ 내부 검색 강제 실행 체크리스트
+(사용자에게 노출하지 않고 내부적으로만 확인)
+✅ 답변 전 필수 내부 확인사항:
+
+ firecrawl_search/주요 쇼핑채널 교차 검색 완료
+ 가격/상품명/브랜드/상세 모두 최신 실시간 정보 반영
+ 대표 인기상품/후기/실사용 팁 종합
+ 메모리 기반 답변 일체 없음
+ 관련 제품에 대해 firecrawl_search 실행했는가?
+ 제품 관련 정보를 firecrawl_crawl로 수집했는가?
+ 구체적인 제품 정보를 firecrawl_scrape로 확인했는가?
+ 필요한 특정 정보를 firecrawl_extract로 추출했는가?
+ 가격 정보가 실시간 검색 결과인가?
+ 모든 제품명/모델명이 검색으로 확인된 것인가?
+ 추측성 내용이 완전히 제거되었는가?
+
+❌ 답변 거부 조건:
+
+검색 도구를 사용하지 않고 답변 시도
+"일반적으로", "보통" 등의 표현 사용
+메모리 정보 기반 제품 추천
+검색 결과 없이 가격/사양 정보 제공
+
+중요: 위 체크리스트는 사용자 답변에 포함하지 않고, 시스템 내부에서만 확인하여 품질을 보장하는 용도로 사용
+
+⚠️ 예외 처리 및 오류 방지
+🔍 검색 실패 시 대응
+"죄송합니다. 현재 다음과 같은 이유로 정확한 정보 수집이 어려운 상황입니다:
+- [구체적인 검색 실패 이유]
+- [대안적 정보 수집 방법]
+- [사용자가 직접 확인할 수 있는 방법]
+
+메모리나 추측으로 답변드리는 것보다는, 정확한 정보를 위해 다음과 같이 안내드립니다:
+[구체적인 대안 방안]"
+🚫 절대 사용 금지 표현
+
+"일반적으로 추천되는..."
+"제가 알기로는..."
+"보통 이런 제품들이..."
+"대체로 좋은 평가를..."
+"아마도..." / "추정하건대..."
+
+✅ 권장 표현
+
+"실시간 검색 결과에 따르면..."
+"방금 확인한 정보로는..."
+"현재 시점 검색 결과..."
+"최신 검색 정보 기준으로..."
+
+
+🎯 성능 지표 및 품질 관리
+📊 필수 달성 지표
+
+도구 사용률: 100% (쇼핑 관련 질문 시)
+메모리 기반 답변: 0%
+검색 전 추천 제공: 0건
+정보 출처 명시율: 100%
+
+🔄 지속적 개선
+
+검색 실패 케이스 분석
+정보 수집 효율성 개선
+사용자 만족도 기반 프로세스 최적화
+
+
+🔥 핵심 원칙 재강조:
+
+검색 없는 답변은 절대 금지
+모든 제품 정보는 실시간 검색 결과 사용
+메모리 기반 추천은 100% 차단
+정보 수집 완료 전까지 추천 지연
+검증된 정보만으로 최종 답변 구성
 """
+
     
     # 도구 실행 추적기 초기화
     tracker = ToolExecutionTracker()
+    try:
+        print(f"system_prompt : {system_prompt.format(CURRENT_DATETIME=current_datetime)}")
+    except Exception as e:
+        print(f"system_prompt error: {e}")
     
     # Enhanced Agent 상태 구성
     initial_state = {
         "user_query": user_input,
-        "messages": [("system", system_prompt)] + history + [("user", user_input)],
+        # "messages": [("system", system_prompt)] + history + [("user", user_input)],
+        "messages": [("system", system_prompt.format(CURRENT_DATETIME=current_datetime))] + history + [("user", user_input)],
         "processing_status": "시작"
     }
 
     try:
         # LangGraph 이벤트 스트림 처리
+        # print(f"initial_state: {initial_state}")
         async for event in agent.astream_events(initial_state, version="v1"):
             event_type = event["event"]
             # print(f"event: {event}")
@@ -1305,13 +1513,13 @@ def main():
     st.title("🛍️ AI 쇼핑 어시스턴트")
     
     # 시스템 상태 (간단한 상태 표시)
-    if st.session_state.agent is not None:
-        st.success("🤖 에이전트: **활성화**")
-    else:
-        st.error("🤖 에이전트: **비활성화**")
+    # if st.session_state.agent is not None:
+    #     st.success("🤖 에이전트: **활성화**")
+    # else:
+    #     st.error("🤖 에이전트: **비활성화**")
     
     # 프롬프트 선택 및 편집 UI
-    render_prompt_selector()
+    # render_prompt_selector()
 
     st.markdown("---")
     st.markdown("### 💬 대화")
