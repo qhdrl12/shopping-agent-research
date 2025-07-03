@@ -964,10 +964,92 @@ def render_individual_prompt_sections():
         st.session_state.selected_response_prompt = "default"
     
     # 질문 분석 프롬프트 섹션
-    with st.expander(f"🔍 질문 분석 프롬프트 - {st.session_state.selected_analysis_prompt}", expanded=False):
-        analysis_summary = extract_prompt_summary(current_prompt.get('query_analysis_prompt', ''))
-        st.markdown(f'<div class="prompt-info">특징: {analysis_summary}</div>', unsafe_allow_html=True)
-        st.caption(f"📝 {len(current_prompt.get('query_analysis_prompt', '')):,}자")
+    col_expander, col_selector = st.columns([3.5, 1])
+    
+    with col_expander:
+        with st.expander(f"🔍 질문 분석 프롬프트 - {st.session_state.selected_analysis_prompt}", expanded=False):
+            analysis_summary = extract_prompt_summary(current_prompt.get('query_analysis_prompt', ''))
+            st.markdown(f'<div class="prompt-info">특징: {analysis_summary}</div>', unsafe_allow_html=True)
+            st.caption(f"📝 {len(current_prompt.get('query_analysis_prompt', '')):,}자")
+            
+            source_prompt_analysis = st.session_state.selected_analysis_prompt
+            
+            # 편집 가능한 텍스트 영역
+            # 선택된 프롬프트에서 내용 가져오기
+            if source_prompt_analysis:
+                source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_analysis, "query_analysis")
+                if source_data:
+                    initial_analysis_content = source_data.get('content', '')
+                else:
+                    initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
+            else:
+                initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
+            
+            new_analysis_prompt = st.text_area(
+                "질문 분석 프롬프트 편집",
+                value=initial_analysis_content,
+                height=300,
+                key="edit_analysis_prompt",
+                help="사용자 질문을 분석하여 구조화된 정보를 추출하는 프롬프트"
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("💾 저장", key="save_analysis", use_container_width=True):
+                    st.session_state.show_save_analysis_form = True
+                    st.session_state.temp_analysis_content_for_save = new_analysis_prompt
+                    st.rerun()
+            
+            # 저장 폼 표시
+            if st.session_state.get('show_save_analysis_form', False):
+                with st.form("save_analysis_form", clear_on_submit=True):
+                    st.markdown("**💾 질문 분석 프롬프트 저장**")
+                    save_name = st.text_input(
+                        "저장할 프롬프트 이름",
+                        value="",
+                        placeholder="예: advanced_analysis, custom_prompt_v1",
+                        help="새로운 이름으로 저장하거나 기존 이름으로 덮어쓰기 (default는 보호됨)"
+                    )
+                    
+                    col_save1, col_save2, col_save3 = st.columns(3)
+                    with col_save1:
+                        if st.form_submit_button("✅ 저장 확인", type="primary", use_container_width=True):
+                            if save_name:
+                                success = save_prompt_as_new(
+                                    save_name, 
+                                    st.session_state.temp_analysis_content_for_save,
+                                    current_prompt.get('model_response_prompt', ''),
+                                    'analysis'
+                                )
+                                if success:
+                                    st.session_state.show_save_analysis_form = False
+                                    if hasattr(st.session_state, 'temp_analysis_content_for_save'):
+                                        del st.session_state.temp_analysis_content_for_save
+                                    st.rerun()
+                            else:
+                                st.warning("프롬프트 이름을 입력해주세요.")
+                    
+                    with col_save2:
+                        if st.form_submit_button("❌ 취소", use_container_width=True):
+                            st.session_state.show_save_analysis_form = False
+                            if hasattr(st.session_state, 'temp_analysis_content_for_save'):
+                                del st.session_state.temp_analysis_content_for_save
+                            st.rerun()
+            
+            with col2:
+                if st.button("⚡ 적용", key="temp_apply_analysis", use_container_width=True):
+                    # 임시로 메모리에만 저장하고 에이전트 재구성
+                    st.session_state.temp_prompts = {
+                        'analysis': new_analysis_prompt,
+                        'response': current_prompt.get('model_response_prompt', '')
+                    }
+                    st.session_state.agent = None
+                    st.success("⚡ 적용됨!")
+                    st.rerun()
+    
+    with col_selector:
+        # 높이 맞춤을 위한 빈 공간 추가
+        st.write("")
         
         # 프롬프트 선택 (질문 분석용)
         available_analysis_prompts = st.session_state.prompt_manager.get_prompt_list_by_type("query_analysis")
@@ -981,11 +1063,12 @@ def render_individual_prompt_sections():
                 st.session_state.selected_analysis_prompt = available_analysis_prompts[0]
             
             selected_analysis_prompt = st.selectbox(
-                "🔄 질문 분석 프롬프트 선택:",
+                "프롬프트 선택",
                 options=available_analysis_prompts,
                 index=current_index,
                 key="analysis_prompt_selector",
-                help="사용할 질문 분석 프롬프트를 선택하세요."
+                help="사용할 질문 분석 프롬프트를 선택하세요.",
+                label_visibility="collapsed"
             )
             
             # 선택이 변경된 경우 업데이트
@@ -996,86 +1079,99 @@ def render_individual_prompt_sections():
                 st.success(f"✅ 질문 분석 프롬프트가 '{selected_analysis_prompt}'로 변경되었습니다!")
                 st.rerun()
         
-        source_prompt_analysis = st.session_state.selected_analysis_prompt
-        
-        # 편집 가능한 텍스트 영역
-        # 선택된 프롬프트에서 내용 가져오기
-        if source_prompt_analysis:
-            source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_analysis, "query_analysis")
-            if source_data:
-                initial_analysis_content = source_data.get('content', '')
-            else:
-                initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
-        else:
-            initial_analysis_content = current_prompt.get('query_analysis_prompt', '')
-        
-        new_analysis_prompt = st.text_area(
-            "질문 분석 프롬프트 편집",
-            value=initial_analysis_content,
-            height=300,
-            key="edit_analysis_prompt",
-            help="사용자 질문을 분석하여 구조화된 정보를 추출하는 프롬프트"
-        )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("💾 저장", key="save_analysis", use_container_width=True):
-                st.session_state.show_save_analysis_form = True
-                st.session_state.temp_analysis_content_for_save = new_analysis_prompt
-                st.rerun()
-        
-        # 저장 폼 표시
-        if st.session_state.get('show_save_analysis_form', False):
-            with st.form("save_analysis_form", clear_on_submit=True):
-                st.markdown("**💾 질문 분석 프롬프트 저장**")
-                save_name = st.text_input(
-                    "저장할 프롬프트 이름",
-                    value="",
-                    placeholder="예: advanced_analysis, custom_prompt_v1",
-                    help="새로운 이름으로 저장하거나 기존 이름으로 덮어쓰기 (default는 보호됨)"
-                )
-                
-                col_save1, col_save2, col_save3 = st.columns(3)
-                with col_save1:
-                    if st.form_submit_button("✅ 저장 확인", type="primary", use_container_width=True):
-                        if save_name:
-                            success = save_prompt_as_new(
-                                save_name, 
-                                st.session_state.temp_analysis_content_for_save,
-                                current_prompt.get('model_response_prompt', ''),
-                                'analysis'
-                            )
-                            if success:
-                                st.session_state.show_save_analysis_form = False
-                                if hasattr(st.session_state, 'temp_analysis_content_for_save'):
-                                    del st.session_state.temp_analysis_content_for_save
-                                st.rerun()
-                        else:
-                            st.warning("프롬프트 이름을 입력해주세요.")
-                
-                with col_save2:
-                    if st.form_submit_button("❌ 취소", use_container_width=True):
-                        st.session_state.show_save_analysis_form = False
-                        if hasattr(st.session_state, 'temp_analysis_content_for_save'):
-                            del st.session_state.temp_analysis_content_for_save
-                        st.rerun()
-        
-        with col2:
-            if st.button("⚡ 적용", key="temp_apply_analysis", use_container_width=True):
-                # 임시로 메모리에만 저장하고 에이전트 재구성
-                st.session_state.temp_prompts = {
-                    'analysis': new_analysis_prompt,
-                    'response': current_prompt.get('model_response_prompt', '')
-                }
-                st.session_state.agent = None
-                st.success("⚡ 적용됨!")
-                st.rerun()
     
     # 최종 답변 프롬프트 섹션
-    with st.expander(f"💬 최종 답변 프롬프트 - {st.session_state.selected_response_prompt}", expanded=False):
-        response_summary = extract_prompt_summary(current_prompt.get('model_response_prompt', ''))
-        st.markdown(f'<div class="prompt-info">특징: {response_summary}</div>', unsafe_allow_html=True)
-        st.caption(f"📝 {len(current_prompt.get('model_response_prompt', '')):,}자")
+    col_expander2, col_selector2 = st.columns([3.5, 1])
+    
+    with col_expander2:
+        with st.expander(f"💬 최종 답변 프롬프트 - {st.session_state.selected_response_prompt}", expanded=False):
+            response_summary = extract_prompt_summary(current_prompt.get('model_response_prompt', ''))
+            st.markdown(f'<div class="prompt-info">특징: {response_summary}</div>', unsafe_allow_html=True)
+            st.caption(f"📝 {len(current_prompt.get('model_response_prompt', '')):,}자")
+            
+            source_prompt_response = st.session_state.selected_response_prompt
+            
+            # 편집 가능한 텍스트 영역
+            # 선택된 프롬프트에서 내용 가져오기
+            if source_prompt_response:
+                source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_response, "model_response")
+                if source_data:
+                    initial_response_content = source_data.get('content', '')
+                else:
+                    initial_response_content = current_prompt.get('model_response_prompt', '')
+            else:
+                initial_response_content = current_prompt.get('model_response_prompt', '')
+                
+            if hasattr(st.session_state, 'temp_response_content'):
+                initial_response_content = st.session_state.temp_response_content
+                del st.session_state.temp_response_content
+            
+            new_response_prompt = st.text_area(
+                "최종 답변 프롬프트 편집",
+                value=initial_response_content,
+                height=300,
+                key="edit_response_prompt",
+                help="수집된 정보를 바탕으로 최종 답변을 생성하는 프롬프트"
+            )
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("💾 저장", key="save_response", use_container_width=True):
+                    st.session_state.show_save_response_form = True
+                    st.session_state.temp_response_content_for_save = new_response_prompt
+                    st.rerun()
+            
+            # 저장 폼 표시
+            if st.session_state.get('show_save_response_form', False):
+                with st.form("save_response_form", clear_on_submit=True):
+                    st.markdown("**💾 최종 답변 프롬프트 저장**")
+                    save_name = st.text_input(
+                        "저장할 프롬프트 이름",
+                        value="",
+                        placeholder="예: advanced_response, custom_prompt_v1",
+                        help="새로운 이름으로 저장하거나 기존 이름으로 덮어쓰기 (default는 보호됨)"
+                    )
+                    
+                    col_save1, col_save2 = st.columns(2)
+                    with col_save1:
+                        if st.form_submit_button("✅ 저장 확인", type="primary", use_container_width=True):
+                            if save_name:
+                                success = save_prompt_as_new(
+                                    save_name,
+                                    current_prompt.get('query_analysis_prompt', ''),
+                                    st.session_state.temp_response_content_for_save,
+                                    'response'
+                                )
+                                if success:
+                                    st.session_state.show_save_response_form = False
+                                    if hasattr(st.session_state, 'temp_response_content_for_save'):
+                                        del st.session_state.temp_response_content_for_save
+                                    st.rerun()
+                            else:
+                                st.warning("프롬프트 이름을 입력해주세요.")
+                    
+                    with col_save2:
+                        if st.form_submit_button("❌ 취소", use_container_width=True):
+                            st.session_state.show_save_response_form = False
+                            if hasattr(st.session_state, 'temp_response_content_for_save'):
+                                del st.session_state.temp_response_content_for_save
+                            st.rerun()
+            
+            with col2:
+                if st.button("⚡ 적용", key="temp_apply_response", use_container_width=True):
+                    # 임시로 메모리에만 저장하고 에이전트 재구성
+                    current_analysis = st.session_state.temp_prompts.get('analysis') if hasattr(st.session_state, 'temp_prompts') else current_prompt.get('query_analysis_prompt', '')
+                    st.session_state.temp_prompts = {
+                        'analysis': current_analysis,
+                        'response': new_response_prompt
+                    }
+                    st.session_state.agent = None
+                    st.success("⚡ 적용됨!")
+                    st.rerun()
+    
+    with col_selector2:
+        # 높이 맞춤을 위한 빈 공간 추가
+        st.write("")
         
         # 프롬프트 선택 (최종 답변용)
         available_response_prompts = st.session_state.prompt_manager.get_prompt_list_by_type("model_response")
@@ -1089,11 +1185,12 @@ def render_individual_prompt_sections():
                 st.session_state.selected_response_prompt = available_response_prompts[0]
             
             selected_response_prompt = st.selectbox(
-                "🔄 최종 답변 프롬프트 선택:",
+                "프롬프트 선택",
                 options=available_response_prompts,
                 index=current_index,
                 key="response_prompt_selector",
-                help="사용할 최종 답변 프롬프트를 선택하세요."
+                help="사용할 최종 답변 프롬프트를 선택하세요.",
+                label_visibility="collapsed"
             )
             
             # 선택이 변경된 경우 업데이트
@@ -1104,85 +1201,6 @@ def render_individual_prompt_sections():
                 st.success(f"✅ 최종 답변 프롬프트가 '{selected_response_prompt}'로 변경되었습니다!")
                 st.rerun()
         
-        source_prompt_response = st.session_state.selected_response_prompt
-        
-        # 편집 가능한 텍스트 영역
-        # 선택된 프롬프트에서 내용 가져오기
-        if source_prompt_response:
-            source_data = st.session_state.prompt_manager.get_prompt_by_type(source_prompt_response, "model_response")
-            if source_data:
-                initial_response_content = source_data.get('content', '')
-            else:
-                initial_response_content = current_prompt.get('model_response_prompt', '')
-        else:
-            initial_response_content = current_prompt.get('model_response_prompt', '')
-            
-        if hasattr(st.session_state, 'temp_response_content'):
-            initial_response_content = st.session_state.temp_response_content
-            del st.session_state.temp_response_content
-        
-        new_response_prompt = st.text_area(
-            "최종 답변 프롬프트 편집",
-            value=initial_response_content,
-            height=300,
-            key="edit_response_prompt",
-            help="수집된 정보를 바탕으로 최종 답변을 생성하는 프롬프트"
-        )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("💾 저장", key="save_response", use_container_width=True):
-                st.session_state.show_save_response_form = True
-                st.session_state.temp_response_content_for_save = new_response_prompt
-                st.rerun()
-        
-        # 저장 폼 표시
-        if st.session_state.get('show_save_response_form', False):
-            with st.form("save_response_form", clear_on_submit=True):
-                st.markdown("**💾 최종 답변 프롬프트 저장**")
-                save_name = st.text_input(
-                    "저장할 프롬프트 이름",
-                    value="",
-                    placeholder="예: advanced_response, custom_prompt_v1",
-                    help="새로운 이름으로 저장하거나 기존 이름으로 덮어쓰기 (default는 보호됨)"
-                )
-                
-                col_save1, col_save2 = st.columns(2)
-                with col_save1:
-                    if st.form_submit_button("✅ 저장 확인", type="primary", use_container_width=True):
-                        if save_name:
-                            success = save_prompt_as_new(
-                                save_name,
-                                current_prompt.get('query_analysis_prompt', ''),
-                                st.session_state.temp_response_content_for_save,
-                                'response'
-                            )
-                            if success:
-                                st.session_state.show_save_response_form = False
-                                if hasattr(st.session_state, 'temp_response_content_for_save'):
-                                    del st.session_state.temp_response_content_for_save
-                                st.rerun()
-                        else:
-                            st.warning("프롬프트 이름을 입력해주세요.")
-                
-                with col_save2:
-                    if st.form_submit_button("❌ 취소", use_container_width=True):
-                        st.session_state.show_save_response_form = False
-                        if hasattr(st.session_state, 'temp_response_content_for_save'):
-                            del st.session_state.temp_response_content_for_save
-                        st.rerun()
-        
-        with col2:
-            if st.button("⚡ 적용", key="temp_apply_response", use_container_width=True):
-                # 임시로 메모리에만 저장하고 에이전트 재구성
-                current_analysis = st.session_state.temp_prompts.get('analysis') if hasattr(st.session_state, 'temp_prompts') else current_prompt.get('query_analysis_prompt', '')
-                st.session_state.temp_prompts = {
-                    'analysis': current_analysis,
-                    'response': new_response_prompt
-                }
-                st.session_state.agent = None
-                st.success("⚡ 적용됨!")
-                st.rerun()
 
 def save_prompt_section(current_prompt, section_key, new_content):
     """프롬프트 섹션 저장"""

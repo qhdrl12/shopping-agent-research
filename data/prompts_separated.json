@@ -16,22 +16,6 @@
       "type": "query_analysis",
       "created_at": "2025-07-03 13:40:29.228652",
       "updated_at": "2025-07-03T16:15:53.141365"
-    },
-    {
-      "id": 3,
-      "name": "테스트 프롬프트 v1",
-      "content": "테스트 프롬프트",
-      "type": "query_analysis",
-      "created_at": "2025-07-03 13:42:16.849466",
-      "updated_at": "2025-07-03T16:15:53.141368"
-    },
-    {
-      "id": 4,
-      "name": "테스트 v2",
-      "content": "ㅏ하하 ",
-      "type": "query_analysis",
-      "created_at": "2025-07-03 13:46:31.654066",
-      "updated_at": "2025-07-03T16:15:53.141370"
     }
   ],
   "model_response": [
@@ -46,19 +30,11 @@
     },
     {
       "id": 2,
-      "name": "최종 답변 테스트  v1",
-      "content": "테스트 저장 ",
+      "name": "private_v1",
+      "content": "해적처럼 대답해주세요.",
       "type": "model_response",
       "created_at": "2025-07-03 13:46:19.514195",
       "updated_at": "2025-07-03T16:15:53.141373"
-    },
-    {
-      "id": 3,
-      "name": "테스트11",
-      "content": "테스트 저장 111",
-      "type": "model_response",
-      "created_at": "2025-07-03 14:54:09.747397",
-      "updated_at": "2025-07-03T16:15:53.141375"
     }
   ]
 }
